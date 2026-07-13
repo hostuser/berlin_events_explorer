@@ -1,3 +1,12 @@
+# cli.py
+#
+# Copyright (c) 2026 Markus Binsteiner
+# All rights reserved.
+#
+# SPDX-License-Identifier: MIT
+#
+# Licensed under the MIT License
+
 """Command-line interface for Berlin Events Explorer."""
 
 from __future__ import annotations
@@ -11,6 +20,7 @@ from rich.console import Console
 from berlin_events_explorer.augment import AugmentError, augment_events
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore
+from berlin_events_explorer.webapp import run_server
 from berlin_events_explorer.sync import (
     SyncError,
     clear_sync_cache,
@@ -93,6 +103,25 @@ def augment(database: Path) -> None:
         f"{result.updated} updated, {result.unchanged} unchanged, "
         f"{result.processed} processed"
     )
+
+
+@cli.command()
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=click.IntRange(min=1, max=65535), default=8000)
+@click.option(
+    "--reload", is_flag=True, default=False, help="Auto-reload when files change"
+)
+def web(database: Path, host: str, port: int, reload: bool) -> None:
+    """Run the Litestar web UI."""
+
+    run_server(database=database, host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":

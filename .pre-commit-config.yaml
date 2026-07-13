@@ -9,12 +9,13 @@ repos:
     - id: uv-lock
     - id: uv-export
 
-- repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
-  rev: 'v9.20.0'
+- repo: local
   hooks:
     - id: commitlint
+      name: commitlint
+      entry: ./scripts/pre-commit-commitlint.sh
+      language: script
       stages: [commit-msg]
-      additional_dependencies: ['@commitlint/config-conventional']
 
 - repo: https://github.com/allganize/ty-pre-commit
   # Ty version.

@@ -43,6 +43,18 @@ installed, which should be the case for Linux & Mac OS X systems.
 - `just lint`: run the `ruff` linter on the source code
 - `just format`: run the `ruff` formatter on the source code (similar to `black`)
 
+### Web UI
+
+Run the new Litestar web interface to browse synced events:
+
+```
+uv run berlin-events web --database events.sqlite --host 127.0.0.1 --port 8000
+```
+
+The UI renders the local SQLite event list and includes a **Sync now** control.
+Clicking it now triggers an in-page Datastar action that runs synchronization and updates the table without
+reloading the full page.
+
 Alternatively, if you don't have the `just` command available, you can use `uv` directly to run those tasks:
 
 - `uv run pytest tests`
@@ -56,4 +68,3 @@ Copyright (c) 2026 - Markus Binsteiner
 
 
 This project is published under the MIT license, for the license text please check the [LICENSE](/LICENSE) file in this repository.
-
