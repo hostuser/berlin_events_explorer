@@ -10,20 +10,23 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Column,
+    Connection,
     DateTime,
+    Engine,
     Integer,
     MetaData,
     String,
     Table,
     Text,
     create_engine,
+    func,
     insert,
     select,
     update,
 )
-from sqlalchemy.engine import Engine
 
 from berlin_events_explorer.models import Event
+
 
 metadata = MetaData()
 events_table = Table(
@@ -121,6 +124,8 @@ class EventStore:
         etag: str | None,
         last_modified: str | None,
         content_hash: str | None,
+        checked_at: datetime | None = None,
+        connection: Connection | None = None,
     ) -> None:
         values = {
             "provider": provider,
@@ -128,98 +133,122 @@ class EventStore:
             "etag": etag,
             "last_modified": last_modified,
             "content_hash": content_hash,
-            "checked_at": datetime.now(timezone.utc),
+            "checked_at": checked_at or datetime.now(timezone.utc),
         }
-        with self.engine.begin() as connection:
-            existing = connection.execute(
-                select(snapshots_table.c.provider).where(
-                    snapshots_table.c.provider == provider
-                )
-            ).scalar_one_or_none()
-            if existing is None:
-                connection.execute(insert(snapshots_table).values(**values))
-            else:
-                connection.execute(
-                    update(snapshots_table)
-                    .where(snapshots_table.c.provider == provider)
-                    .values(**values)
-                )
+        if connection is None:
+            with self.engine.begin() as conn:
+                self._save_snapshot(conn, values)
+        else:
+            self._save_snapshot(connection, values)
 
-    def upsert(self, event: Event) -> UpsertResult:
-        payload = event.model_dump(mode="json")
-        now = datetime.now(timezone.utc)
-        with self.engine.begin() as connection:
-            existing = (
-                connection.execute(
-                    select(events_table).where(events_table.c.id == event.id)
-                )
-                .mappings()
-                .one_or_none()
+    def _save_snapshot(self, connection: Connection, values: dict[str, Any]) -> None:
+        existing = connection.execute(
+            select(snapshots_table.c.provider).where(
+                snapshots_table.c.provider == values["provider"]
             )
-            if existing is None:
-                connection.execute(
-                    insert(events_table).values(
-                        id=event.id,
-                        provider=event.source.provider,
-                        source_record_hash=event.source.source_record_hash,
-                        event_json=payload,
-                        first_seen_at=event.first_seen_at or now,
-                        last_seen_at=event.last_seen_at or now,
-                        updated_at=now,
-                    )
+        ).scalar_one_or_none()
+        if existing is None:
+            connection.execute(insert(snapshots_table).values(**values))
+        else:
+            connection.execute(
+                update(snapshots_table)
+                .where(snapshots_table.c.provider == values["provider"])
+                .values(**values)
+            )
+
+    def upsert(
+        self,
+        event: Event,
+        *,
+        connection: Connection | None = None,
+        now: datetime | None = None,
+    ) -> UpsertResult:
+        now = now or datetime.now(timezone.utc)
+        if connection is None:
+            with self.engine.begin() as conn:
+                return self._upsert(event, conn, now=now)
+        return self._upsert(event, connection, now=now)
+
+    def _upsert(
+        self,
+        event: Event,
+        connection: Connection,
+        now: datetime,
+    ) -> UpsertResult:
+        payload = event.model_dump(mode="json")
+        existing = (
+            connection.execute(
+                select(events_table).where(events_table.c.id == event.id)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if existing is None:
+            connection.execute(
+                insert(events_table).values(
+                    id=event.id,
+                    provider=event.source.provider,
+                    source_record_hash=event.source.source_record_hash,
+                    event_json=payload,
+                    first_seen_at=event.first_seen_at or now,
+                    last_seen_at=event.last_seen_at or now,
+                    updated_at=now,
                 )
-                action = "created"
-                changes = {"event": {"old": None, "new": payload}}
-            else:
-                old_payload = existing["event_json"]
-                changes = _diff_payload(
-                    _comparison_payload(old_payload), _comparison_payload(payload)
-                )
-                if not changes:
-                    connection.execute(
-                        update(events_table)
-                        .where(events_table.c.id == event.id)
-                        .values(last_seen_at=now)
-                    )
-                    return UpsertResult(action="unchanged", changes={})
+            )
+            action = "created"
+            changes = {"event": {"old": None, "new": payload}}
+        else:
+            old_payload = existing["event_json"]
+            changes = _diff_payload(
+                _comparison_payload(old_payload),
+                _comparison_payload(payload),
+            )
+            if not changes:
                 connection.execute(
                     update(events_table)
                     .where(events_table.c.id == event.id)
-                    .values(
-                        provider=event.source.provider,
-                        source_record_hash=event.source.source_record_hash,
-                        event_json=payload,
-                        last_seen_at=now,
-                        updated_at=now,
-                    )
+                    .values(last_seen_at=now)
                 )
-                action = "updated"
-
+                return UpsertResult(action="unchanged", changes={})
             connection.execute(
-                insert(audit_table).values(
-                    event_id=event.id,
+                update(events_table)
+                .where(events_table.c.id == event.id)
+                .values(
                     provider=event.source.provider,
-                    action=action,
-                    changes_json=changes,
-                    changed_at=now,
+                    source_record_hash=event.source.source_record_hash,
+                    event_json=payload,
+                    last_seen_at=now,
+                    updated_at=now,
                 )
             )
-            return UpsertResult(action=action, changes=changes)
+            action = "updated"
+
+        connection.execute(
+            insert(audit_table).values(
+                event_id=event.id,
+                provider=event.source.provider,
+                action=action,
+                changes_json=changes,
+                changed_at=now,
+            )
+        )
+        return UpsertResult(action=action, changes=changes)
 
     def list_events(self) -> list[Event]:
         with self.engine.connect() as connection:
             rows = connection.execute(select(events_table.c.event_json)).all()
         return [Event.model_validate(row[0]) for row in rows]
 
-    def count_events(self, provider: str) -> int:
-        from sqlalchemy import func
-
-        with self.engine.connect() as connection:
-            return connection.execute(
-                select(func.count())
-                .select_from(events_table)
-                .where(events_table.c.provider == provider)
-            ).scalar_one()
+    def count_events(self, provider: str, connection: Connection | None = None) -> int:
+        query = (
+            select(func.count())
+            .select_from(events_table)
+            .where(events_table.c.provider == provider)
+        )
+        if connection is None:
+            with self.engine.connect() as db_connection:
+                return db_connection.execute(query).scalar_one()
+        return connection.execute(query).scalar_one()
 
     def list_audit_log(self) -> list[AuditEntry]:
         with self.engine.connect() as connection:

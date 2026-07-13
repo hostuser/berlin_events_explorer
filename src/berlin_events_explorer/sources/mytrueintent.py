@@ -69,7 +69,15 @@ class MyTrueIntentSource:
         start_date, end_date, precision = _parse_date(raw.raw_date)
         status = _parse_status(raw.raw_note)
         event_key = "|".join(
-            [raw.source_name, start_date.isoformat(), raw.raw_artist, raw.raw_venue]
+            [
+                raw.source_name,
+                raw.source_record_id or "",
+                f"{start_date.isoformat()}..{end_date.isoformat()}"
+                if end_date
+                else start_date.isoformat(),
+                raw.raw_artist,
+                raw.raw_venue,
+            ]
         )
         event_id = hashlib.sha256(event_key.encode("utf-8")).hexdigest()
         performers = [

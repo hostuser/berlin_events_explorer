@@ -10,7 +10,7 @@ from rich.console import Console
 
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore
-from berlin_events_explorer.sync import sync_source
+from berlin_events_explorer.sync import SyncError, sync_source
 
 console = Console()
 
@@ -32,7 +32,13 @@ def sync(database: Path) -> None:
     """Synchronize events from configured sources."""
     store = EventStore(database)
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        result = sync_source(MyTrueIntentSource(), store, client)
+        try:
+            result = sync_source(MyTrueIntentSource(), store, client)
+        except SyncError as exc:
+            raise click.ClickException(str(exc))
+        except httpx.RequestError as exc:
+            raise click.ClickException(f"Network error: {exc}")
+
     state = "downloaded" if result.downloaded else "not modified"
     console.print(
         f"[bold]Sync complete[/bold] ({state}): "
