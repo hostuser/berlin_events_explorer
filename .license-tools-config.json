@@ -1,0 +1,11 @@
+{
+  "author": {
+    "from_git": true
+  },
+  "license": "MIT",
+  "custom_license": "SPDX-License-Identifier: MIT\n\nLicensed under the MIT License",
+  "include": [
+    "src/**/*.py"
+  ],
+  "lines_after_license": "ignore"
+}

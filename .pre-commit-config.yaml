@@ -1,0 +1,62 @@
+default_language_version:
+    python: python3
+
+repos:
+- repo: https://github.com/astral-sh/uv-pre-commit
+  # uv version.
+  rev: 0.8.7
+  hooks:
+    - id: uv-lock
+    - id: uv-export
+
+- repo: https://github.com/alessandrojcm/commitlint-pre-commit-hook
+  rev: 'v9.20.0'
+  hooks:
+    - id: commitlint
+      stages: [commit-msg]
+      additional_dependencies: ['@commitlint/config-conventional']
+
+- repo: https://github.com/allganize/ty-pre-commit
+  # Ty version.
+  rev: v0.0.11
+  hooks:
+    # Run the type checker.
+    - id: ty-check
+      args: [ --venv=./.venv ]
+
+- repo: https://github.com/emzeat/mz-lictools
+  rev: v2.9.0
+  hooks:
+    - id: license-tools
+
+- repo: https://github.com/asottile/pyupgrade
+  rev: v3.21.2
+  hooks:
+    -   id: pyupgrade
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  # Ruff version.
+  rev: v0.8.3
+  hooks:
+    - id: ruff
+      args: [ --fix ]
+    - id: ruff-format
+
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v4.6.0  # Use the ref you want to point at
+  hooks:
+  - id: trailing-whitespace
+  - id: check-added-large-files
+  - id: check-ast
+  - id: check-json
+  - id: check-merge-conflict
+  - id: check-xml
+  - id: check-yaml
+  - id: debug-statements
+  - id: end-of-file-fixer
+    exclude: '(.*.json|.*.j2)'
+  - id: requirements-txt-fixer
+  - id: mixed-line-ending
+    args: ['--fix=no']
+  - id: no-commit-to-branch
+    args: [--branch, main]

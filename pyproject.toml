@@ -1,0 +1,121 @@
+[build-system]
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
+
+[project]
+name = "berlin_events_explorer"
+description = "Parse and explore Berlin music events with enriched venue and performer metadata."
+authors = [
+    {name = "Markus Binsteiner", email = "markus@frkl.dev"}
+]
+readme = "README.md"
+requires-python = ">=3.9,<4.0"
+keywords = []
+license = "MIT"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
+]
+dependencies = [
+]
+dynamic = ["version"]
+
+
+[project.optional-dependencies]
+
+[dependency-groups]
+dev = [
+    "build",
+    "devtools",
+    "icecream",
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "rich",
+    "ruff",
+    "snoop",
+    "ty",
+    "wat"
+]
+
+[project.urls]
+homepage = "https://github.com/hostuser/berlin_events_explorer"
+documentation = "https://hostuser.github.io/berlin_events_explorer"
+repository = "https://github.com/hostuser/berlin_events_explorer"
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/berlin_events_explorer"]
+
+[tool.hatch.build.hooks.version]
+path = "src/berlin_events_explorer/_version.py"
+template = '''version = "{version}"
+'''
+
+[tool.uv-dynamic-versioning]
+pattern = "default-unprefixed"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "--color=yes"
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests"
+]
+
+[tool.ruff]
+line-length = 88
+
+src = ["src", "tests"]
+
+fix = true
+
+# Assume Python 3.10.
+target-version = "py310"
+
+[tool.ruff.lint]
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.isort]
+known-first-party = ["berlin_events_explorer"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.rules]
+unused-ignore-comment = "ignore"
+
+[tool.pixi.project]
+channels = ["conda-forge"]
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64"]
+
+[tool.pixi.dependencies]
+pip = ">=25.0"
+
+[tool.pixi.pypi-dependencies]
+"berlin_events_explorer" = { path = ".", editable = true }
+
+[tool.pixi.feature.dev_utils.pypi-dependencies]
+"" = { path = ".", editable = true, extras = ["dev"] }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"] }  # should be the same solve-group, but that doesn't seem to work with pixi currently

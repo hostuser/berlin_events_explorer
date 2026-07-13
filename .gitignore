@@ -1,0 +1,14 @@
+# project-files
+src/berlin_events_explorer/_version.py
+uv.lock
+pixi.lock
+.pixi/
+.venv/
+
+# misc
+.idea/
+.init.log
+.vscode
+**/__pycache__/**
+**.egg-info/
+requirements.txt

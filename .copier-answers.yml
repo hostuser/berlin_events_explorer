@@ -1,0 +1,12 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: 0.1.8
+_src_path: /tmp/python-project-template
+anaconda_user: ''
+email: markus@frkl.dev
+full_name: Markus Binsteiner
+github_user: hostuser
+project_licenses:
+- MIT
+project_name: Berlin Events Explorer
+project_short_description: Parse and explore Berlin music events with enriched venue
+    and performer metadata.
