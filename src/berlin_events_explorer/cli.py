@@ -8,9 +8,15 @@ import click
 import httpx
 from rich.console import Console
 
+from berlin_events_explorer.augment import AugmentError, augment_events
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore
-from berlin_events_explorer.sync import SyncError, sync_source
+from berlin_events_explorer.sync import (
+    SyncError,
+    clear_sync_cache,
+    open_sync_cache,
+    sync_source,
+)
 
 console = Console()
 
@@ -28,12 +34,31 @@ def cli() -> None:
     show_default=True,
     help="SQLite database path.",
 )
-def sync(database: Path) -> None:
+@click.option(
+    "--cache-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    show_default=False,
+    help="Disk cache directory for sync metadata and payloads.",
+)
+@click.option(
+    "--clear-cache",
+    is_flag=True,
+    default=False,
+    help="Clear sync on-disk cache before syncing.",
+)
+def sync(database: Path, cache_dir: Path | None, clear_cache: bool) -> None:
     """Synchronize events from configured sources."""
     store = EventStore(database)
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
         try:
-            result = sync_source(MyTrueIntentSource(), store, client)
+            with open_sync_cache(cache_dir) as cache:
+                if clear_cache:
+                    clear_sync_cache(cache)
+                    console.print("[yellow]Sync cache cleared[/yellow]")
+                result = sync_source(
+                    MyTrueIntentSource(), store, client, http_cache=cache
+                )
         except SyncError as exc:
             raise click.ClickException(str(exc))
         except httpx.RequestError as exc:
@@ -44,6 +69,29 @@ def sync(database: Path) -> None:
         f"[bold]Sync complete[/bold] ({state}): "
         f"{result.created} created, {result.updated} updated, "
         f"{result.unchanged} unchanged"
+    )
+
+
+@cli.command()
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+def augment(database: Path) -> None:
+    """Run local augmentation against all stored events."""
+    store = EventStore(database)
+    try:
+        result = augment_events(store)
+    except AugmentError as exc:
+        raise click.ClickException(str(exc))
+
+    console.print(
+        f"[bold]Augment complete[/bold]: "
+        f"{result.updated} updated, {result.unchanged} unchanged, "
+        f"{result.processed} processed"
     )
 
 

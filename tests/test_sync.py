@@ -5,6 +5,7 @@ import time
 import httpx
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
+import diskcache
 
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore
@@ -215,3 +216,46 @@ def test_duplicate_rows_keep_distinct_ids(tmp_path) -> None:
     assert result.created == 2
     assert len(events) == 2
     assert len({event.id for event in events}) == 2
+
+
+def test_disk_cache_backfills_new_database_on_304(tmp_path) -> None:
+    """A fresh database can reconstruct events from disk-cached source payload."""
+
+    source = MyTrueIntentSource()
+    cache_path = tmp_path / "sync-cache"
+
+    first_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, text=CSV_V1, headers={"etag": '"v1"'})
+        )
+    )
+    second_requests: list[httpx.Request] = []
+
+    def second_handler(request: httpx.Request) -> httpx.Response:
+        second_requests.append(request)
+        return httpx.Response(304, headers={"etag": '"v1"'})
+
+    second_client = httpx.Client(transport=httpx.MockTransport(second_handler))
+
+    with diskcache.Cache(cache_path) as cache:
+        try:
+            sync_source(
+                source,
+                EventStore(tmp_path / "first.sqlite"),
+                first_client,
+                http_cache=cache,
+            )
+
+            second_db = EventStore(tmp_path / "second.sqlite")
+            result = sync_source(source, second_db, second_client, http_cache=cache)
+        finally:
+            first_client.close()
+            second_client.close()
+
+    assert len(second_requests) == 1
+    assert second_requests[0].headers.get("if-none-match") == '"v1"'
+    assert result.downloaded is False
+    assert result.created == 2
+    assert result.updated == 0
+    assert result.unchanged == 0
+    assert len(second_db.list_events()) == 2
