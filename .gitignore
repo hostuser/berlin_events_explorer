@@ -12,3 +12,4 @@ pixi.lock
 **/__pycache__/**
 **.egg-info/
 requirements.txt
+events.sqlite

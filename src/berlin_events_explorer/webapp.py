@@ -85,6 +85,214 @@ def render_events_page(
 ) -> str:
     """Render a full HTML page with the provided events."""
 
+    styles = """ :root {
+        --surface: #ffffff;
+        --surface-soft: #f3f5f9;
+        --text: #0f172a;
+        --muted: #64748b;
+        --primary: #3b82f6;
+        --line: #d5dbe8;
+        --danger: #dc2626;
+        --radius-lg: 0.85rem;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, "Segoe UI", Roboto, sans-serif;
+        background: linear-gradient(180deg, #f6f7fb 0%, #eef2ff 45%, #f8fafc 100%);
+        color: var(--text);
+      }
+
+      .events-app {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 3rem;
+      }
+
+      .events-header {
+        margin-bottom: 1rem;
+      }
+
+      .page-kicker {
+        display: inline-block;
+        margin: 0 0 0.3rem;
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--primary);
+        font-weight: 650;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.5rem, 2.6vw, 2.15rem);
+        line-height: 1.2;
+      }
+
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+
+      .sync-button {
+        border: 1px solid transparent;
+        padding: 0.5rem 1rem;
+        border-radius: var(--radius-lg);
+        background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+        color: #ffffff;
+        font-weight: 600;
+        cursor: pointer;
+        transition: transform 120ms ease, box-shadow 120ms ease;
+      }
+
+      .sync-button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
+      }
+
+      .sync-button:disabled {
+        filter: grayscale(0.25);
+        cursor: not-allowed;
+        box-shadow: none;
+        transform: none;
+      }
+
+      .sync-error {
+        color: var(--danger);
+        min-height: 1.1rem;
+        font-weight: 500;
+      }
+
+      #events-panel {
+        margin-top: 0.5rem;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-lg);
+        padding: 0.9rem;
+        box-shadow: 0 16px 40px rgba(15, 23, 42, 0.07);
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin: 0.25rem 0 0.75rem;
+      }
+
+      .pagination {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin: 0.4rem 0 1rem;
+      }
+
+      .pagination-link {
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--text);
+        text-decoration: none;
+        padding: 0.35rem 0.85rem;
+        font-size: 0.9rem;
+        background: var(--surface-soft);
+      }
+
+      .pagination-link:hover {
+        background: #dbeafe;
+      }
+
+      .pagination-link.disabled {
+        color: #94a3b8;
+        pointer-events: none;
+        background: #f8fafc;
+      }
+
+      .pagination-page {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.95rem;
+      }
+
+      thead th {
+        font-weight: 650;
+        color: #334155;
+        text-align: left;
+        border-bottom: 1px solid var(--line);
+        padding: 0.65rem 0.5rem;
+      }
+
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 0.6rem 0.5rem;
+        border-bottom: 1px solid var(--line);
+      }
+
+      tbody tr:hover td {
+        background: #f8fafc;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      @media (max-width: 720px) {
+        .events-app {
+          padding: 1rem 0.75rem 2rem;
+        }
+
+        .toolbar {
+          align-items: stretch;
+        }
+
+        table,
+        thead,
+        tbody,
+        tr,
+        th,
+        td {
+          display: block;
+        }
+
+        thead {
+          display: none;
+        }
+
+        tbody tr {
+          margin-bottom: 0.7rem;
+          border: 1px solid var(--line);
+          border-radius: 0.7rem;
+          overflow: hidden;
+        }
+
+        tbody tr td {
+          padding: 0.45rem 0.65rem;
+          border-bottom: 1px solid var(--line);
+        }
+
+        tbody tr td::before {
+          content: attr(data-label);
+          display: block;
+          color: var(--muted);
+          font-size: 0.78rem;
+          margin-bottom: 0.2rem;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        tbody tr td:last-child {
+          border-bottom: none;
+        }
+      }"""
+
     events_html = _render_events_panel(
         events,
         total_count=total_count,
@@ -94,89 +302,32 @@ def render_events_page(
     )
 
     return f"""<!doctype html>
-<html lang=\"en\">
+<html lang="en">
   <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Berlin Events Explorer</title>
-    <script type=\"module\" src=\"{DATASTAR_SCRIPT}\"></script>
+    <script type="module" src="{DATASTAR_SCRIPT}"></script>
     <style>
-      body {{
-        font-family: Arial, sans-serif;
-        margin: 1.5rem;
-        color: #1f2937;
-      }}
-      table {{
-        width: 100%;
-        border-collapse: collapse;
-      }}
-      th,
-      td {{
-        padding: 0.65rem 0.5rem;
-        border-bottom: 1px solid #e5e7eb;
-        text-align: left;
-      }}
-      th {{
-        color: #374151;
-        font-weight: 600;
-      }}
-      .meta {{
-        color: #4b5563;
-        font-size: 0.9rem;
-      }}
-      .sync-error {{
-        color: #b91c1c;
-        min-height: 1.1rem;
-      }}
-      .sync-button {{
-        margin-bottom: 1rem;
-        padding: 0.45rem 0.9rem;
-        border: 1px solid #2563eb;
-        border-radius: 0.375rem;
-        background-color: #2563eb;
-        color: white;
-        cursor: pointer;
-      }}
-      .sync-button:hover {{
-        background-color: #1d4ed8;
-      }}
-      .pagination {{
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin: 0.5rem 0 0.75rem;
-      }}
-      .pagination-link {{
-        border: 1px solid #9ca3af;
-        border-radius: 0.35rem;
-        color: #1f2937;
-        text-decoration: none;
-        padding: 0.25rem 0.6rem;
-      }}
-      .pagination-link:hover {{
-        background: #f3f4f6;
-      }}
-      .pagination-link.disabled {{
-        color: #9ca3af;
-        pointer-events: none;
-      }}
-      .pagination-page {{
-        font-size: 0.9rem;
-      }}
+{styles}
     </style>
   </head>
   <body>
-    <main data-signals='{{eventCount: {total_count}, isSyncing: false, syncError: null}}'>
-      <h1 data-text="'Berlin Events Explorer (' + $eventCount + ')'">Berlin Events Explorer</h1>
-      <button
-        type="button"
-        class="sync-button"
-        data-attr="{{'disabled': $isSyncing}}"
-        data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
-        data-on:click="@post('sync')">
-
-        Sync now
-      </button>
+    <main class="events-app" data-signals='{{eventCount: {total_count}, isSyncing: false, syncError: null}}'>
+      <header class="events-header">
+        <p class="page-kicker">Berlin Events</p>
+        <div class="toolbar">
+          <h1 data-text="'Berlin Events Explorer (' + $eventCount + ')'">Berlin Events Explorer</h1>
+          <button
+            type="button"
+            class="sync-button"
+            data-attr="{{'disabled': $isSyncing}}"
+            data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
+            data-on:click="@post('sync')">
+            Sync now
+          </button>
+        </div>
+      </header>
       <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
       {events_html}
     </main>
@@ -373,11 +524,11 @@ def _render_event_row(event: Event) -> str:
 
     return (
         "<tr>"
-        f"<td>{event_date}</td>"
-        f"<td>{title}</td>"
-        f"<td>{venue}</td>"
-        f"<td>{performers or 'TBA'}</td>"
-        f"<td>{tags or '—'}</td>"
+        f"<td data-label=\"Start date\">{event_date}</td>"
+        f"<td data-label=\"Title\">{title}</td>"
+        f"<td data-label=\"Venue\">{venue}</td>"
+        f"<td data-label=\"Performers\">{performers or 'TBA'}</td>"
+        f"<td data-label=\"Tags\">{tags or '—'}</td>"
         "</tr>"
     )
 
