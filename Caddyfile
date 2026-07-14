@@ -1,0 +1,15 @@
+{
+	acme_dns cloudflare {
+		api_token {env.CLOUDFLARE_API_TOKEN}
+	}
+}
+
+# Hermes dashboard
+agent.ada.x74.pw {
+	reverse_proxy 100.117.164.104:9119
+}
+
+# Berlin Events webapp
+berlin-events.ada.x74.pw {
+	reverse_proxy 127.0.0.1:8000
+}
