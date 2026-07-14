@@ -478,9 +478,9 @@ def _render_events_panel(
     pagination = f"""
       <p class="meta">Showing {start_index} to {end_index} of {total_count} events</p>
       <div class="pagination" aria-label="Event pagination">
-        <a class="pagination-link {'disabled' if not has_prev else ''}" href="{prev_url}">Previous</a>
+        <a class="pagination-link {"disabled" if not has_prev else ""}" href="{prev_url}">Previous</a>
         <span class="pagination-page">Page {page} of {total_pages}</span>
-        <a class="pagination-link {'disabled' if not has_next else ''}" href="{next_url}">Next</a>
+        <a class="pagination-link {"disabled" if not has_next else ""}" href="{next_url}">Next</a>
       </div>
     """
 
@@ -524,11 +524,11 @@ def _render_event_row(event: Event) -> str:
 
     return (
         "<tr>"
-        f"<td data-label=\"Start date\">{event_date}</td>"
-        f"<td data-label=\"Title\">{title}</td>"
-        f"<td data-label=\"Venue\">{venue}</td>"
-        f"<td data-label=\"Performers\">{performers or 'TBA'}</td>"
-        f"<td data-label=\"Tags\">{tags or '—'}</td>"
+        f'<td data-label="Start date">{event_date}</td>'
+        f'<td data-label="Title">{title}</td>'
+        f'<td data-label="Venue">{venue}</td>'
+        f'<td data-label="Performers">{performers or "TBA"}</td>'
+        f'<td data-label="Tags">{tags or "—"}</td>'
         "</tr>"
     )
 
