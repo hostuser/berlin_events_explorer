@@ -163,7 +163,7 @@ def render_events_page(
       .pagination-page {{
         font-size: 0.9rem;
       }}
-
+    </style>
   </head>
   <body>
     <main data-signals='{{eventCount: {total_count}, isSyncing: false, syncError: null}}'>
@@ -321,8 +321,8 @@ def _render_events_panel(
     end_index = min((page - 1) * page_size + len(events), total_count)
     has_prev = page > 1
     has_next = page < total_pages
-    prev_url = f"/?page={page - 1}&page_size={page_size}" if has_prev else "#"
-    next_url = f"/?page={page + 1}&page_size={page_size}" if has_next else "#"
+    prev_url = f"?page={page - 1}&page_size={page_size}" if has_prev else "#"
+    next_url = f"?page={page + 1}&page_size={page_size}" if has_next else "#"
 
     pagination = f"""
       <p class="meta">Showing {start_index} to {end_index} of {total_count} events</p>
