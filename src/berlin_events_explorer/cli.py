@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import click
@@ -118,10 +119,32 @@ def augment(database: Path) -> None:
 @click.option(
     "--reload", is_flag=True, default=False, help="Auto-reload when files change"
 )
-def web(database: Path, host: str, port: int, reload: bool) -> None:
+@click.option(
+    "--sync-interval-minutes",
+    type=click.IntRange(min=0),
+    default=60,
+    show_default=True,
+    help="Automatic sync interval; use 0 to disable scheduled syncing.",
+)
+def web(
+    database: Path,
+    host: str,
+    port: int,
+    reload: bool,
+    sync_interval_minutes: int,
+) -> None:
     """Run the Litestar web UI."""
 
-    run_server(database=database, host=host, port=port, reload=reload)
+    sync_interval = (
+        timedelta(minutes=sync_interval_minutes) if sync_interval_minutes else None
+    )
+    run_server(
+        database=database,
+        host=host,
+        port=port,
+        reload=reload,
+        sync_interval=sync_interval,
+    )
 
 
 if __name__ == "__main__":

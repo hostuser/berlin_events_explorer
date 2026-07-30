@@ -51,6 +51,19 @@ Run the new Litestar web interface to browse synced events:
 uv run berlin-events web --database events.sqlite --host 127.0.0.1 --port 8000
 ```
 
+### Automatic synchronization
+
+The web service runs an in-process background sync by default, without a separate
+worker. It waits for the configured interval before the first run, then synchronizes
+sequentially; a slow sync never overlaps a second sync. The default is one hour:
+
+```
+uv run berlin-events web --database events.sqlite --sync-interval-minutes 60
+```
+
+Set `--sync-interval-minutes 0` to disable the scheduled sync. The existing **Sync now**
+control remains available for an immediate manual refresh.
+
 The UI renders the local SQLite event list and includes a **Sync now** control.
 Clicking it now triggers an in-page Datastar action that runs synchronization and updates the table without
 reloading the full page.

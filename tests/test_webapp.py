@@ -1,7 +1,9 @@
 """Tests for the Litestar web UI."""
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from litestar.testing import TestClient
 
 from berlin_events_explorer.models import Event, EventSourceRef, Performer, Venue
@@ -9,6 +11,7 @@ from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.webapp import (
     _paginate_events,
     _recent_events,
+    _periodic_sync,
     _render_events_panel,
     _upcoming_events,
     _sse_event,
@@ -283,6 +286,36 @@ def test_webapp_sync_endpoint_runs_sync_and_returns_datastar_events(
     patch_index = event_lines.index("event: datastar-patch-elements")
     assert event_lines[patch_index + 1].startswith("data: elements <section")
     assert event_lines[patch_index + 2] == ""
+
+
+@pytest.mark.anyio
+async def test_periodic_sync_repeats_until_shutdown(monkeypatch, tmp_path) -> None:
+    """The in-process scheduler should run sequential syncs until it is stopped."""
+
+    calls = 0
+    completed_two_syncs = asyncio.Event()
+
+    def _fake_sync(_: EventStore) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            completed_two_syncs.set()
+
+    monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _fake_sync)
+    stop_event = asyncio.Event()
+    task = asyncio.create_task(
+        _periodic_sync(
+            store=EventStore(tmp_path / "events.sqlite"),
+            interval=timedelta(milliseconds=1),
+            stop_event=stop_event,
+        )
+    )
+
+    await asyncio.wait_for(completed_two_syncs.wait(), timeout=1)
+    stop_event.set()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert calls >= 2
 
 
 def test_sse_event_removes_payload_newlines() -> None:

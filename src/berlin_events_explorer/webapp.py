@@ -11,10 +11,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from html import escape
 from pathlib import Path
+from typing import AsyncIterator
 import math
 
 import httpx
@@ -32,9 +36,34 @@ DATASTAR_SCRIPT = (
 )
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
+logger = logging.getLogger(__name__)
 
 
-def create_app(database: Path | str = Path("events.sqlite")) -> Litestar:
+async def _periodic_sync(
+    *, store: EventStore, interval: timedelta, stop_event: asyncio.Event
+) -> None:
+    """Sync periodically until the application requests shutdown."""
+
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
+        except TimeoutError:
+            pass
+        else:
+            return
+
+        try:
+            await asyncio.to_thread(perform_sync, store)
+        except Exception:
+            logger.exception("Scheduled event sync failed")
+
+
+def create_app(
+    database: Path | str = Path("events.sqlite"),
+    *,
+    sync_interval: timedelta | None = DEFAULT_SYNC_INTERVAL,
+) -> Litestar:
     """Create a Litestar app that renders stored events as HTML."""
 
     store = EventStore(database)
@@ -84,7 +113,35 @@ def create_app(database: Path | str = Path("events.sqlite")) -> Litestar:
 
         return {"status": "ok"}
 
-    return Litestar(route_handlers=[index, sync, health])
+    if sync_interval is not None and sync_interval <= timedelta():
+        raise ValueError("sync_interval must be positive or None")
+
+    @asynccontextmanager
+    async def periodic_sync_lifespan(_: Litestar) -> AsyncIterator[None]:
+        if sync_interval is None:
+            yield
+            return
+
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            _periodic_sync(
+                store=store,
+                interval=sync_interval,
+                stop_event=stop_event,
+            ),
+            name="berlin-events-periodic-sync",
+        )
+        try:
+            yield
+        finally:
+            stop_event.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    return Litestar(
+        route_handlers=[index, sync, health], lifespan=[periodic_sync_lifespan]
+    )
 
 
 def render_events_page(
@@ -704,10 +761,17 @@ def perform_sync(store: EventStore) -> None:
             )
 
 
-def run_server(*, database: Path, host: str, port: int, reload: bool = False) -> None:
+def run_server(
+    *,
+    database: Path,
+    host: str,
+    port: int,
+    reload: bool = False,
+    sync_interval: timedelta | None = DEFAULT_SYNC_INTERVAL,
+) -> None:
     """Run the Litestar application with uvicorn."""
 
     import uvicorn
 
-    app = create_app(database)
+    app = create_app(database, sync_interval=sync_interval)
     uvicorn.run(app, host=host, port=port, reload=reload)
