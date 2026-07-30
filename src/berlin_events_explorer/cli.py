@@ -78,7 +78,7 @@ def sync(database: Path, cache_dir: Path | None, clear_cache: bool) -> None:
     console.print(
         f"[bold]Sync complete[/bold] ({state}): "
         f"{result.created} created, {result.updated} updated, "
-        f"{result.unchanged} unchanged"
+        f"{result.unchanged} unchanged, {result.errors} errors logged"
     )
 
 

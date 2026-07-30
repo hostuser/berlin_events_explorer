@@ -28,6 +28,7 @@ class SyncResult:
     created: int
     updated: int
     unchanged: int
+    errors: int = 0
 
 
 class SyncError(RuntimeError):
@@ -70,6 +71,12 @@ def sync_source(
     try:
         response = client.get(source.url, headers=headers)
     except httpx.RequestError as exc:
+        store.log(
+            level="error",
+            event="source_request_failed",
+            message=f"Network request failed for {source.name}: {exc}",
+            context={"provider": source.name, "url": source.url},
+        )
         raise SyncError(f"Network request failed for {source.name}: {exc}") from exc
 
     if response.status_code == 304:
@@ -113,6 +120,16 @@ def sync_source(
     try:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        store.log(
+            level="error",
+            event="source_response_failed",
+            message=f"Source {source.name} responded with HTTP {response.status_code}",
+            context={
+                "provider": source.name,
+                "url": source.url,
+                "status_code": response.status_code,
+            },
+        )
         raise SyncError(
             f"Source {source.name} responded with HTTP {response.status_code}"
         ) from exc
@@ -141,11 +158,19 @@ def _sync_payload_from_text(
     http_cache: Cache | None,
 ) -> SyncResult:
     try:
-        events = list(source.parse(payload_text, fetched_at=now))
+        parse_result = source.parse(payload_text, fetched_at=now)
     except ValueError as exc:
+        store.log(
+            level="error",
+            event="source_payload_parse_failed",
+            message=f"Could not parse event data from {source.name}: {exc}",
+            context={"provider": source.name, "url": source.url},
+        )
         raise SyncError(
             f"Could not parse event data from {source.name}: {exc}"
         ) from exc
+
+    events = parse_result.events
 
     etag = response.headers.get("etag") or (
         request_snapshot.etag if request_snapshot else None
@@ -166,6 +191,16 @@ def _sync_payload_from_text(
                     updated += 1
                 else:
                     unchanged += 1
+
+            for issue in parse_result.issues:
+                store.log(
+                    level=issue.level,
+                    event=issue.event,
+                    message=issue.message,
+                    context=issue.context,
+                    created_at=now,
+                    connection=connection,
+                )
 
             store.save_snapshot(
                 provider=source.name,
@@ -195,6 +230,7 @@ def _sync_payload_from_text(
         created=created,
         updated=updated,
         unchanged=unchanged,
+        errors=len(parse_result.issues),
     )
 
 

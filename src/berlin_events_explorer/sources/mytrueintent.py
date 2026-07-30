@@ -17,7 +17,11 @@ from berlin_events_explorer.models import (
     Performer,
     Venue,
 )
-from berlin_events_explorer.sources.base import RawSourceEvent
+from berlin_events_explorer.sources.base import (
+    RawSourceEvent,
+    SourceParseIssue,
+    SourceParseResult,
+)
 
 
 class MyTrueIntentSource:
@@ -31,8 +35,8 @@ class MyTrueIntentSource:
     )
     required_columns = {"Date", "Note", "Artist", "Venue"}
 
-    def parse(self, content: str, fetched_at: datetime | None = None) -> list[Event]:
-        """Parse CSV content into canonical events."""
+    def parse(self, content: str, fetched_at: datetime | None = None) -> SourceParseResult:
+        """Parse CSV content, retaining row diagnostics without aborting the batch."""
         fetched_at = fetched_at or datetime.now(timezone.utc)
         reader = csv.DictReader(io.StringIO(content))
         columns = set(reader.fieldnames or [])
@@ -42,6 +46,7 @@ class MyTrueIntentSource:
             raise ValueError(f"CSV is missing required columns: {missing_columns}")
 
         events: list[Event] = []
+        issues: list[SourceParseIssue] = []
         for row_number, row in enumerate(reader, start=2):
             raw = {key: (value or "").strip() for key, value in row.items()}
             raw_date = raw["Date"]
@@ -62,8 +67,25 @@ class MyTrueIntentSource:
                 fetched_at=fetched_at,
                 raw_data=raw,
             )
-            events.append(self._to_event(raw_event))
-        return events
+            try:
+                events.append(self._to_event(raw_event))
+            except ValueError as exc:
+                issues.append(
+                    SourceParseIssue(
+                        level="error",
+                        event="source_row_parse_failed",
+                        message=f"Skipped source row {row_number}: {exc}",
+                        context={
+                            "provider": self.name,
+                            "source_record_id": str(row_number),
+                            "date": raw_date,
+                            "artist": raw_artist,
+                            "venue": raw_venue,
+                            "error": str(exc),
+                        },
+                    )
+                )
+        return SourceParseResult(events=events, issues=issues)
 
     def _to_event(self, raw: RawSourceEvent) -> Event:
         start_date, end_date, precision = _parse_date(raw.raw_date)
@@ -143,4 +165,4 @@ def _four_digit_year(year: str) -> int:
 
 def parse_events(content: str) -> Iterable[Event]:
     """Convenience function for parsing with the default source."""
-    return MyTrueIntentSource().parse(content)
+    return MyTrueIntentSource().parse(content).events

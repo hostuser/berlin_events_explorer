@@ -62,6 +62,16 @@ audit_table = Table(
     Column("changes_json", JSON, nullable=False),
     Column("changed_at", DateTime(timezone=True), nullable=False),
 )
+logs_table = Table(
+    "log",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("level", String(20), nullable=False, index=True),
+    Column("event", String(100), nullable=False, index=True),
+    Column("message", Text, nullable=False),
+    Column("context_json", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, index=True),
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +95,17 @@ class AuditEntry:
     action: str
     changes: dict[str, Any]
     changed_at: datetime
+
+
+@dataclass(frozen=True)
+class LogEntry:
+    """One structured application diagnostic stored in SQLite."""
+
+    level: str
+    event: str
+    message: str
+    context: dict[str, Any]
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -262,6 +283,52 @@ class EventStore:
                     action=row["action"],
                     changes=row["changes_json"],
                     changed_at=row["changed_at"],
+                )
+                for row in rows
+            ]
+
+    def log(
+        self,
+        *,
+        level: str,
+        event: str,
+        message: str,
+        context: dict[str, Any] | None = None,
+        created_at: datetime | None = None,
+        connection: Connection | None = None,
+    ) -> None:
+        """Persist an application diagnostic at error, info, or debug level."""
+
+        if level not in {"debug", "info", "warning", "error"}:
+            raise ValueError(f"Unsupported log level: {level!r}")
+        values = {
+            "level": level,
+            "event": event,
+            "message": message,
+            "context_json": context or {},
+            "created_at": created_at or datetime.now(timezone.utc),
+        }
+        if connection is None:
+            with self.engine.begin() as conn:
+                conn.execute(insert(logs_table).values(**values))
+        else:
+            connection.execute(insert(logs_table).values(**values))
+
+    def list_logs(self, *, level: str | None = None) -> list[LogEntry]:
+        """Return application diagnostics in insertion order."""
+
+        query = select(logs_table).order_by(logs_table.c.id)
+        if level is not None:
+            query = query.where(logs_table.c.level == level)
+        with self.engine.connect() as connection:
+            rows = connection.execute(query).mappings()
+            return [
+                LogEntry(
+                    level=row["level"],
+                    event=row["event"],
+                    message=row["message"],
+                    context=row["context_json"],
+                    created_at=row["created_at"],
                 )
                 for row in rows
             ]

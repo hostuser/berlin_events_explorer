@@ -25,6 +25,11 @@ CSV_DUPLICATE = """Date,Note,Artist,Venue
 13.07.2026,,Haevn,Classic Open Air
 13.07.2026,,Haevn,Classic Open Air
 """
+CSV_WITH_INVALID_ROW = """Date,Note,Artist,Venue
+13.07.2026,,Haevn,Classic Open Air
+not-a-date,,Broken source row,Nowhere
+15.07.2026,new,New Artist,Schokoladen
+"""
 
 
 def test_first_sync_persists_events_and_audit_log(tmp_path) -> None:
@@ -165,6 +170,28 @@ def test_sync_error_when_csv_is_invalid(tmp_path) -> None:
 
     with pytest.raises(SyncError, match="Could not parse event data"):
         sync_source(MyTrueIntentSource(), store, client)
+
+
+def test_sync_skips_invalid_source_rows_and_persists_an_error_log(tmp_path) -> None:
+    """One malformed row should not prevent valid source rows from syncing."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=CSV_WITH_INVALID_ROW)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    store = EventStore(tmp_path / "events.sqlite")
+
+    result = sync_source(MyTrueIntentSource(), store, client)
+
+    assert result.created == 2
+    assert result.errors == 1
+    assert [event.title for event in store.list_events()] == ["Haevn", "New Artist"]
+    logs = store.list_logs()
+    assert len(logs) == 1
+    assert logs[0].level == "error"
+    assert logs[0].event == "source_row_parse_failed"
+    assert logs[0].context["source_record_id"] == "3"
+    assert logs[0].context["date"] == "not-a-date"
 
 
 def test_sync_rolls_back_on_db_error(monkeypatch, tmp_path) -> None:

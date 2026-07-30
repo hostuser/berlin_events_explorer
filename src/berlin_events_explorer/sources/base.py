@@ -15,9 +15,29 @@ class EventSource(Protocol):
     name: str
     url: str
 
-    def parse(self, content: str, fetched_at: datetime | None = None) -> list[Event]:
-        """Parse source content into canonical events."""
+    def parse(
+        self, content: str, fetched_at: datetime | None = None
+    ) -> "SourceParseResult":
+        """Parse source content into events and non-fatal row issues."""
         ...
+
+
+@dataclass(frozen=True)
+class SourceParseIssue:
+    """One non-fatal problem encountered while parsing a source row."""
+
+    level: str
+    event: str
+    message: str
+    context: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SourceParseResult:
+    """Canonical events together with non-fatal source-row diagnostics."""
+
+    events: list[Event]
+    issues: list[SourceParseIssue]
 
 
 @dataclass(frozen=True)
