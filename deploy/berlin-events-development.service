@@ -1,0 +1,20 @@
+[Unit]
+Description=Berlin Events Explorer Development Web Frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/dev/berlin-events-explorer
+Environment=PATH=/home/oskar-maria/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/oskar-maria/.local/bin/uv run --directory /home/oskar-maria/projects/dev/berlin-events-explorer berlin-events web --database /home/oskar-maria/.local/share/berlin-events-explorer/development/events.sqlite --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=100
+KillSignal=SIGINT
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

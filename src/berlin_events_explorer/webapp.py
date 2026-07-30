@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from html import escape
 from pathlib import Path
 import math
@@ -40,14 +40,17 @@ def create_app(database: Path | str = Path("events.sqlite")) -> Litestar:
     store = EventStore(database)
 
     @get("/", sync_to_thread=True)
-    def index(page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> Response:
-        events = _sorted_events(list(store.list_events()))
+    def index(
+        page: int = 1,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        tab: str = "recent",
+        recent_days: int = 7,
+    ) -> Response:
+        all_events = list(store.list_events())
+        normalized_days = _normalize_recent_days(recent_days)
+        events = _events_for_tab(all_events, tab=tab, recent_days=normalized_days)
         paged_events, current_page, normalized_page_size, total_pages = (
-            _paginate_events(
-                events,
-                page=page,
-                page_size=page_size,
-            )
+            _paginate_events(events, page=page, page_size=page_size)
         )
         html = render_events_page(
             paged_events,
@@ -55,13 +58,22 @@ def create_app(database: Path | str = Path("events.sqlite")) -> Litestar:
             page=current_page,
             page_size=normalized_page_size,
             total_pages=total_pages,
+            tab=tab,
+            recent_days=normalized_days,
         )
         return Response(content=html, media_type="text/html")
 
     @post("/sync", status_code=200, sync_to_thread=True)
-    def sync(page: int = 1, page_size: int = DEFAULT_PAGE_SIZE) -> Stream:
+    def sync(
+        page: int = 1,
+        page_size: int = DEFAULT_PAGE_SIZE,
+        tab: str = "recent",
+        recent_days: int = 7,
+    ) -> Stream:
         return Stream(
-            content=_perform_sync_stream(store, page=page, page_size=page_size),
+            content=_perform_sync_stream(
+                store, page=page, page_size=page_size, tab=tab, recent_days=recent_days
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
@@ -82,6 +94,8 @@ def render_events_page(
     page: int,
     page_size: int,
     total_pages: int,
+    tab: str = "upcoming",
+    recent_days: int = 7,
 ) -> str:
     """Render a full HTML page with the provided events."""
 
@@ -165,6 +179,45 @@ def render_events_page(
         color: var(--danger);
         min-height: 1.1rem;
         font-weight: 500;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 0.35rem;
+        align-items: center;
+        margin: 1.25rem 0 0.75rem;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .tab {
+        color: var(--muted);
+        padding: 0.65rem 0.85rem;
+        text-decoration: none;
+        border-bottom: 3px solid transparent;
+        font-weight: 600;
+      }
+
+      .tab:hover,
+      .tab.active {
+        color: var(--primary);
+        border-bottom-color: var(--primary);
+      }
+
+      .recent-settings {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 0 0 0.75rem;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .recent-settings select {
+        border: 1px solid var(--line);
+        border-radius: 0.45rem;
+        padding: 0.35rem 0.5rem;
+        background: var(--surface);
+        color: var(--text);
       }
 
       #events-panel {
@@ -299,6 +352,8 @@ def render_events_page(
         page=page,
         page_size=page_size,
         total_pages=total_pages,
+        tab=tab,
+        recent_days=recent_days,
     )
 
     return f"""<!doctype html>
@@ -323,12 +378,13 @@ def render_events_page(
             class="sync-button"
             data-attr="{{'disabled': $isSyncing}}"
             data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
-            data-on:click="@post('sync')">
+            data-on:click="@post('sync?tab={tab}&recent_days={recent_days}')">
             Sync now
           </button>
         </div>
       </header>
       <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
+      {_render_tabs(tab=tab, recent_days=recent_days)}
       {events_html}
     </main>
   </body>
@@ -337,11 +393,18 @@ def render_events_page(
 
 
 def _perform_sync_stream(
-    store: EventStore, page: int = 1, page_size: int = DEFAULT_PAGE_SIZE
+    store: EventStore,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    tab: str = "upcoming",
+    recent_days: int = 7,
 ):
     """Run sync and emit Datastar SSE patch events."""
 
-    current_events = _sorted_events(list(store.list_events()))
+    normalized_days = _normalize_recent_days(recent_days)
+    current_events = _events_for_tab(
+        list(store.list_events()), tab=tab, recent_days=normalized_days
+    )
     yield _sse_event(
         "datastar-patch-signals",
         _signals_payload(
@@ -358,7 +421,9 @@ def _perform_sync_stream(
     except httpx.RequestError as exc:
         sync_error = f"Sync failed: {escape(str(exc))}"
 
-    synced_events = _sorted_events(list(store.list_events()))
+    synced_events = _events_for_tab(
+        list(store.list_events()), tab=tab, recent_days=normalized_days
+    )
     paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
         synced_events,
         page=page,
@@ -370,6 +435,8 @@ def _perform_sync_stream(
         page=current_page,
         page_size=normalized_page_size,
         total_pages=total_pages,
+        tab=tab,
+        recent_days=normalized_days,
     )
     yield _sse_event(
         "datastar-patch-elements",
@@ -462,18 +529,28 @@ def _render_events_panel(
     page: int,
     page_size: int,
     total_pages: int,
+    tab: str = "upcoming",
+    recent_days: int = 7,
 ) -> str:
     """Render the event table section used for live updates."""
 
-    rows = "".join(_render_event_row(event) for event in events)
+    rows = "".join(
+        _render_event_row(event, show_date_added=tab == "recent") for event in events
+    )
+    date_added_header = "<th>Date added</th>" if tab == "recent" else ""
     empty_state = "<p>No events have been synced yet.</p>" if not events else ""
 
     start_index = (page - 1) * page_size + 1 if total_count else 0
     end_index = min((page - 1) * page_size + len(events), total_count)
     has_prev = page > 1
     has_next = page < total_pages
-    prev_url = f"?page={page - 1}&page_size={page_size}" if has_prev else "#"
-    next_url = f"?page={page + 1}&page_size={page_size}" if has_next else "#"
+    query_suffix = f"&tab={tab}&recent_days={recent_days}"
+    prev_url = (
+        f"?page={page - 1}&page_size={page_size}{query_suffix}" if has_prev else "#"
+    )
+    next_url = (
+        f"?page={page + 1}&page_size={page_size}{query_suffix}" if has_next else "#"
+    )
 
     pagination = f"""
       <p class="meta">Showing {start_index} to {end_index} of {total_count} events</p>
@@ -491,6 +568,7 @@ def _render_events_panel(
         <thead>
           <tr>
             <th>Start date</th>
+            {date_added_header}
             <th>Title</th>
             <th>Venue</th>
             <th>Performers</th>
@@ -513,18 +591,98 @@ def _sorted_events(events: list[Event]) -> list[Event]:
     )
 
 
-def _render_event_row(event: Event) -> str:
+def _normalize_recent_days(days: int) -> int:
+    """Keep the user-configurable recent-events window within safe bounds."""
+
+    return max(1, min(365, days))
+
+
+def _recent_events(
+    events: list[Event], *, days: int = 7, now: datetime | None = None
+) -> list[Event]:
+    """Return events first observed within the requested number of days."""
+
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=_normalize_recent_days(days))
+    return sorted(
+        (
+            event
+            for event in events
+            if event.first_seen_at is not None and event.first_seen_at >= cutoff
+        ),
+        key=lambda event: event.first_seen_at or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+
+
+def _upcoming_events(events: list[Event]) -> list[Event]:
+    """Return dated events occurring today or later, nearest first."""
+
+    today = date.today()
+    return _sorted_events(
+        [
+            event
+            for event in events
+            if event.start_date is not None and event.start_date >= today
+        ]
+    )
+
+
+def _events_for_tab(events: list[Event], *, tab: str, recent_days: int) -> list[Event]:
+    """Select and order the event view requested by the user."""
+
+    if tab == "recent":
+        return _recent_events(events, days=recent_days)
+    return _upcoming_events(events)
+
+
+def _render_tabs(*, tab: str, recent_days: int) -> str:
+    """Render navigation and the recent-events timeframe control."""
+
+    active_tab = tab if tab in {"recent", "upcoming"} else "upcoming"
+    recent_active = "active" if active_tab == "recent" else ""
+    upcoming_active = "active" if active_tab == "upcoming" else ""
+    options = "".join(
+        f'<option value="{days}"{" selected" if days == recent_days else ""}>'
+        f"Last {days} days</option>"
+        for days in (1, 7, 14, 30, 90)
+    )
+    settings = (
+        '<form class="recent-settings" method="get">'
+        '<input type="hidden" name="tab" value="recent">'
+        '<label for="recent-days">Added within</label>'
+        '<select id="recent-days" name="recent_days" onchange="this.form.submit()">'
+        f"{options}</select></form>"
+        if active_tab == "recent"
+        else ""
+    )
+    return (
+        '<nav class="tabs" aria-label="Event views">'
+        f'<a class="tab {recent_active}" href="?tab=recent&recent_days={recent_days}">Recently added</a>'
+        f'<a class="tab {upcoming_active}" href="?tab=upcoming&recent_days={recent_days}">Upcoming</a>'
+        "</nav>"
+        f"{settings}"
+    )
+
+
+def _render_event_row(event: Event, *, show_date_added: bool = False) -> str:
     """Render one event row for the HTML table."""
 
     event_date = event.start_date.isoformat() if event.start_date else "TBA"
+    date_added = (
+        event.first_seen_at.date().isoformat() if event.first_seen_at else "TBA"
+    )
     title = escape(event.title)
     venue = escape(event.venue.name) if event.venue else "TBA"
     performers = ", ".join(escape(performer.name) for performer in event.performers)
     tags = ", ".join(escape(tag) for tag in event.tags)
+    date_added_cell = (
+        f'<td data-label="Date added">{date_added}</td>' if show_date_added else ""
+    )
 
     return (
         "<tr>"
         f'<td data-label="Start date">{event_date}</td>'
+        f"{date_added_cell}"
         f'<td data-label="Title">{title}</td>'
         f'<td data-label="Venue">{venue}</td>'
         f'<td data-label="Performers">{performers or "TBA"}</td>'

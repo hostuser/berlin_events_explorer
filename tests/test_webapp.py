@@ -1,6 +1,6 @@
 """Tests for the Litestar web UI."""
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 from litestar.testing import TestClient
 
@@ -8,7 +8,9 @@ from berlin_events_explorer.models import Event, EventSourceRef, Performer, Venu
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.webapp import (
     _paginate_events,
+    _recent_events,
     _render_events_panel,
+    _upcoming_events,
     _sse_event,
     _sorted_events,
     create_app,
@@ -27,7 +29,8 @@ def _seed_event() -> Event:
             source_record_id="1",
             source_record_hash="hash-1",
         ),
-        start_date=date(2026, 7, 13),
+        start_date=date.today() + timedelta(days=1),
+        first_seen_at=datetime.now(UTC),
         title="House of Signals",
         performers=[Performer(name="DJ Example", billing_order=1)],
         venue=Venue(name="Example Club"),
@@ -85,10 +88,12 @@ def test_render_events_page_renders_table_rows() -> None:
     assert "DJ Example" in page
     assert "techno, house" in page
     assert "Berlin Events Explorer (" in page
-    assert "@post('sync')" in page
+    assert "data-on:click=\"@post('sync?tab=upcoming&recent_days=7')\"" in page
     assert "data-signals" in page
     assert "Page 1 of 2" in page
     assert "?page=2&page_size=25" in page
+    assert "Recently added" in page
+    assert "Upcoming" in page
 
 
 def test_render_events_panel_renders_empty_state() -> None:
@@ -104,6 +109,25 @@ def test_render_events_panel_renders_empty_state() -> None:
 
     assert "No events have been synced yet." in html
     assert "<table>" in html
+
+
+def test_recent_events_panel_includes_date_added_column() -> None:
+    """The recently added view should show when each event was observed."""
+
+    event = _seed_event().model_copy(
+        update={"first_seen_at": datetime(2026, 7, 12, 10, 30, tzinfo=UTC)}
+    )
+    html = _render_events_panel(
+        [event],
+        total_count=1,
+        page=1,
+        page_size=50,
+        total_pages=1,
+        tab="recent",
+    )
+
+    assert "<th>Date added</th>" in html
+    assert 'data-label="Date added">2026-07-12</td>' in html
 
 
 def test_paginate_events_clamps_bad_inputs() -> None:
@@ -163,6 +187,43 @@ def test_sorted_events_orders_by_date_then_title() -> None:
     assert sorted_events[1].title == "Z title"
 
 
+def test_recent_events_uses_first_seen_at_and_configurable_window() -> None:
+    """Recently added events should use storage observation time, not event date."""
+
+    now = datetime.now(UTC)
+    recent = _seed_event().model_copy(
+        update={"id": "recent", "first_seen_at": now - timedelta(days=2)}
+    )
+    old = _seed_event().model_copy(
+        update={"id": "old", "first_seen_at": now - timedelta(days=10)}
+    )
+
+    assert [event.id for event in _recent_events([old, recent], days=7, now=now)] == [
+        "recent"
+    ]
+    assert [event.id for event in _recent_events([old, recent], days=14, now=now)] == [
+        "recent",
+        "old",
+    ]
+
+
+def test_upcoming_events_excludes_past_and_sorts_from_today() -> None:
+    """Upcoming events should omit past dates and be ordered chronologically."""
+
+    yesterday = _seed_event().model_copy(
+        update={"id": "past", "start_date": date.today() - timedelta(days=1)}
+    )
+    tomorrow = _seed_event().model_copy(
+        update={"id": "tomorrow", "start_date": date.today() + timedelta(days=1)}
+    )
+    today = _seed_event().model_copy(update={"id": "today", "start_date": date.today()})
+
+    assert [event.id for event in _upcoming_events([yesterday, tomorrow, today])] == [
+        "today",
+        "tomorrow",
+    ]
+
+
 def test_webapp_root_route_renders_events(tmp_path) -> None:
     """The web route should return an HTML response with stored events."""
 
@@ -189,7 +250,7 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
         response = client.get("/")
 
     assert response.status_code == 200
-    assert "data-on:click=\"@post('sync')\"" in response.text
+    assert "data-on:click=\"@post('sync?tab=recent&recent_days=7')\"" in response.text
     assert "Sync now" in response.text
 
 

@@ -9,7 +9,7 @@ authors = [
     {name = "Markus Binsteiner", email = "markus@frkl.dev"}
 ]
 readme = "README.md"
-requires-python = ">=3.9,<4.0"
+requires-python = ">=3.14,<4.0"
 keywords = []
 license = "MIT"
 classifiers = [
@@ -18,10 +18,7 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13"
+    "Programming Language :: Python :: 3.14"
 ]
 dependencies = [
     "click>=8.1",
@@ -98,8 +95,8 @@ src = ["src", "tests"]
 
 fix = true
 
-# Assume Python 3.10.
-target-version = "py310"
+# Assume Python 3.14.
+target-version = "py314"
 
 [tool.ruff.lint]
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"

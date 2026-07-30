@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+
+set -eu
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+SCRIPT="$REPO_ROOT/scripts/restart-development-service.sh"
+
+if [ -x "$SCRIPT" ]; then
+  "$SCRIPT"
+fi

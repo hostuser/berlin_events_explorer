@@ -2,10 +2,5 @@
 
 set -eu
 
-SERVICE="berlin-events-webfrontend.service"
-SHELL="/usr/bin/systemctl"
-
-if [ -x "$SHELL" ]; then
-  "$SHELL" --user restart "$SERVICE" >/tmp/berlin-events-webfrontend-restart.log 2>&1 || \
-    true
-fi
+# Backward-compatible entry point for the development post-commit workflow.
+exec "$(dirname "$0")/restart-development-service.sh"

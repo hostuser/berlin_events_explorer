@@ -1,0 +1,26 @@
+#!/usr/bin/env sh
+
+# Git invokes this hook with prepared, committed, or aborted. On the committed
+# phase, stdin contains: <old-value> <new-value> <ref-name> for each ref.
+# Restart production only for creation of a new local tag; regular commits and
+# tag deletions are deliberately ignored.
+set -eu
+
+[ "${1:-}" = "committed" ] || exit 0
+
+ZERO_OID="0000000000000000000000000000000000000000"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+SCRIPT="$REPO_ROOT/scripts/restart-production-service.sh"
+
+while read -r old_oid new_oid ref_name; do
+  case "$ref_name" in
+    refs/tags/*)
+      if [ "$old_oid" = "$ZERO_OID" ] && [ "$new_oid" != "$ZERO_OID" ]; then
+        if [ -x "$SCRIPT" ]; then
+          "$SCRIPT"
+        fi
+        exit 0
+      fi
+      ;;
+  esac
+done

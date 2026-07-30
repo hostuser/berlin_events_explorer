@@ -9,7 +9,12 @@ agent.ada.x74.pw {
 	reverse_proxy 100.117.164.104:9119
 }
 
-# Berlin Events webapp
+# Berlin Events production webapp
 berlin-events.ada.x74.pw {
 	reverse_proxy 127.0.0.1:8000
+}
+
+# Berlin Events development webapp
+berlin-events-dev.ada.x74.pw {
+	reverse_proxy 127.0.0.1:8001
 }

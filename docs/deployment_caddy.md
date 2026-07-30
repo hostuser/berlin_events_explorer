@@ -5,16 +5,17 @@ This project is deployed behind Caddy for HTTPS termination and host-based rever
 ## Scope
 
 - Host: `agent.ada.x74.pw` → Hermes backend `100.117.164.104:9119`
-- Host: `berlin-events.ada.x74.pw` → web app `127.0.0.1:8000`
+- Host: `berlin-events.ada.x74.pw` → production web app `127.0.0.1:8000`
+- Host: `berlin-events-dev.ada.x74.pw` → development web app `127.0.0.1:8001`
 - TLS: automated via ACME with Cloudflare DNS-01
 - Secret handling: token is loaded from `/etc/caddy/cloudflare.env`, not committed to config files
 
-## Source-of-truth Caddyfile
+## Caddy configuration ownership
 
-Keep the repo file as source of truth:
-
-- Repo: `Caddyfile`
-- Deployed to: `/etc/caddy/Caddyfile`
+`/etc/caddy/Caddyfile` is a shared, complete host configuration that also serves other applications.
+The repository `Caddyfile` is the Berlin Events reference fragment; do **not** copy it wholesale
+onto the shared system configuration. Merge its Berlin Events host blocks into
+`/etc/caddy/Caddyfile`, validate the complete configuration, then reload Caddy.
 
 ```caddy
 {
@@ -28,9 +29,14 @@ agent.ada.x74.pw {
     reverse_proxy 100.117.164.104:9119
 }
 
-# Berlin Events webapp
+# Berlin Events production webapp
 berlin-events.ada.x74.pw {
     reverse_proxy 127.0.0.1:8000
+}
+
+# Berlin Events development webapp
+berlin-events-dev.ada.x74.pw {
+    reverse_proxy 127.0.0.1:8001
 }
 ```
 
@@ -110,16 +116,32 @@ ExecReload=/usr/local/bin/caddy-cloudflare reload --config /etc/caddy/Caddyfile 
 ## Deployment flow
 
 ```bash
-# 1) Sync repo config to system location
-sudo cp /home/oskar-maria/berlin-events-explorer/Caddyfile /etc/caddy/Caddyfile
+# 1) Edit the matching Berlin Events host block in the shared configuration.
+sudoedit /etc/caddy/Caddyfile
 
-# 2) Validate with Cloudflare-enabled binary
-/usr/local/bin/caddy-cloudflare validate --adapter caddyfile --config /etc/caddy/Caddyfile
-
-# 3) Reload service
-sudo systemctl daemon-reload
+# 2) Reload validates and applies the complete configuration atomically.
 sudo systemctl reload caddy
+
+# 3) Confirm Caddy stayed healthy.
+systemctl is-active caddy
 ```
+
+## Deployment automation
+
+Git hooks are kept under `.githooks/` and enabled per checkout with:
+
+```bash
+./scripts/install-git-hooks.sh
+```
+
+- Each regular commit restarts only `berlin-events-development.service`.
+- Creating a new Git tag restarts `berlin-events-webfrontend.service`, making the
+  tagged checkout the production deployment.
+- Moving or deleting an existing tag does not restart production.
+
+The production and development services are intentionally independent; the development
+service continues to use its persistent database at
+`~/.local/share/berlin-events-explorer/development/events.sqlite`.
 
 ## Useful verification commands
 
