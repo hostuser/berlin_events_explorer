@@ -29,6 +29,7 @@ class SyncResult:
     updated: int
     unchanged: int
     errors: int = 0
+    deleted: int = 0
 
 
 class SyncError(RuntimeError):
@@ -180,7 +181,7 @@ def _sync_payload_from_text(
     )
     content_hash = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
 
-    created = updated = unchanged = 0
+    created = updated = unchanged = deleted = 0
     try:
         with store.engine.begin() as connection:
             for event in events:
@@ -201,6 +202,12 @@ def _sync_payload_from_text(
                     created_at=now,
                     connection=connection,
                 )
+
+            deleted = store.delete_events_not_in(
+                provider=source.name,
+                event_ids={event.id for event in events},
+                connection=connection,
+            )
 
             store.save_snapshot(
                 provider=source.name,
@@ -231,6 +238,7 @@ def _sync_payload_from_text(
         updated=updated,
         unchanged=unchanged,
         errors=len(parse_result.issues),
+        deleted=deleted,
     )
 
 

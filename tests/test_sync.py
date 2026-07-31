@@ -202,7 +202,7 @@ def test_sync_rolls_back_on_db_error(monkeypatch, tmp_path) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            text=CSV_DUPLICATE,
+            text=CSV_V1,
             headers={"etag": '"v2"'},
         )
 
@@ -228,8 +228,8 @@ def test_sync_rolls_back_on_db_error(monkeypatch, tmp_path) -> None:
     assert store.get_snapshot(source.name) is None
 
 
-def test_duplicate_rows_keep_distinct_ids(tmp_path) -> None:
-    """Rows with same semantic values should remain distinct if source records differ."""
+def test_duplicate_rows_collapse_to_one_semantic_event(tmp_path) -> None:
+    """Identical source rows should be represented by one canonical event."""
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=CSV_DUPLICATE, headers={"etag": '"v1"'})
@@ -240,9 +240,54 @@ def test_duplicate_rows_keep_distinct_ids(tmp_path) -> None:
     result = sync_source(MyTrueIntentSource(), store, client)
     events = store.list_events()
 
-    assert result.created == 2
-    assert len(events) == 2
-    assert len({event.id for event in events}) == 2
+    assert result.created == 1
+    assert len(events) == 1
+
+
+def test_sync_reconciles_legacy_duplicate_records(tmp_path) -> None:
+    """A complete source snapshot should remove legacy IDs no longer emitted."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=CSV_V1, headers={"etag": '"v1"'})
+
+    source = MyTrueIntentSource()
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    store = EventStore(tmp_path / "events.sqlite")
+    legacy_event = (
+        source.parse(CSV_V1).events[0].model_copy(update={"id": "legacy-row-based-id"})
+    )
+    store.upsert(legacy_event)
+
+    result = sync_source(source, store, client)
+
+    assert result.deleted == 1
+    assert {event.title for event in store.list_events()} == {
+        "Haevn",
+        "House Of Protection",
+    }
+    assert "legacy-row-based-id" not in {event.id for event in store.list_events()}
+
+
+def test_sync_reconciles_existing_events_when_source_has_invalid_rows(tmp_path) -> None:
+    """Skipped bad rows should not prevent reconciliation of a downloaded snapshot."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=CSV_WITH_INVALID_ROW, headers={"etag": '"v1"'})
+
+    source = MyTrueIntentSource()
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    store = EventStore(tmp_path / "events.sqlite")
+    legacy_event = (
+        source.parse(CSV_V1)
+        .events[1]
+        .model_copy(update={"id": "not-present-in-source"})
+    )
+    store.upsert(legacy_event)
+
+    result = sync_source(source, store, client)
+
+    assert result.deleted == 1
+    assert "not-present-in-source" not in {event.id for event in store.list_events()}
 
 
 def test_disk_cache_backfills_new_database_on_304(tmp_path) -> None:

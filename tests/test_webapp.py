@@ -6,7 +6,19 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from litestar.testing import TestClient
 
-from berlin_events_explorer.models import Event, EventSourceRef, Performer, Venue
+from berlin_events_explorer.models import (
+    ArtistCandidate,
+    ArtistMetadata,
+    ArtistRecord,
+    ArtistStatus,
+    Event,
+    EventSourceRef,
+    Performer,
+    Venue,
+    VenueCandidate,
+    VenueRecord,
+    VenueStatus,
+)
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.webapp import (
     _paginate_events,
@@ -59,7 +71,12 @@ def _seed_events(total: int) -> list[Event]:
 
 
 def _render_events_page_from(
-    all_events: list[Event], *, total_count: int, page: int, page_size: int
+    all_events: list[Event],
+    *,
+    total_count: int,
+    page: int,
+    page_size: int,
+    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
 ) -> str:
     """Render a page with canonical pagination metadata."""
 
@@ -75,6 +92,7 @@ def _render_events_page_from(
         page=current_page,
         page_size=normalized_page_size,
         total_pages=total_pages,
+        artist_ids_by_event_performer=artist_ids_by_event_performer,
     )
 
 
@@ -83,12 +101,17 @@ def test_render_events_page_renders_table_rows() -> None:
 
     events = _seed_events(50)
     page = _render_events_page_from(
-        events, total_count=len(events), page=1, page_size=25
+        events,
+        total_count=len(events),
+        page=1,
+        page_size=25,
+        artist_ids_by_event_performer={("evt-0", 1): "dj-example"},
     )
 
     assert "Event 00" in page
     assert "Example Club" in page
     assert "DJ Example" in page
+    assert 'href="/artists/dj-example"' in page
     assert "techno, house" in page
     assert "Berlin Events Explorer (" in page
     assert "data-on:click=\"@post('sync?tab=upcoming&recent_days=7')\"" in page
@@ -255,6 +278,425 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
     assert response.status_code == 200
     assert "data-on:click=\"@post('sync?tab=recent&recent_days=7')\"" in response.text
     assert "Sync now" in response.text
+    assert 'href="/approvals"' in response.text
+    assert "Awaiting approval" in response.text
+
+
+def _seed_pending_venue(store: EventStore) -> VenueCandidate:
+    """Persist a pending venue with one reviewable metadata suggestion."""
+
+    store.upsert_venue(
+        VenueRecord(
+            id="example-club",
+            name="Example Club",
+            normalized_name="example club",
+            status=VenueStatus.CANDIDATE,
+        )
+    )
+    candidate = VenueCandidate(
+        venue_id="example-club",
+        provider="nominatim",
+        source_url="https://www.openstreetmap.org/node/123",
+        osm_type="node",
+        osm_id="123",
+        display_name="Example Club, Berlin, Germany",
+        address="Suggested Street 1, 10115 Berlin",
+        postal_code="10115",
+        website="https://suggested.example/",
+        latitude=52.5,
+        longitude=13.4,
+        confidence=1.0,
+        retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    store.record_venue_candidates([candidate])
+    return candidate
+
+
+def test_approval_queue_lists_unapproved_entities_by_type(tmp_path) -> None:
+    """The approval tab shows pending entities and links to type-specific forms."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    _seed_pending_venue(store)
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/approvals")
+
+    assert response.status_code == 200
+    assert "Awaiting approval" in response.text
+    assert "Venue" in response.text
+    assert "Example Club" in response.text
+    assert 'href="/approvals/venues/example-club"' in response.text
+    assert "1 suggestion" in response.text
+
+
+def test_venue_approval_form_offers_suggestion_and_editable_fields(tmp_path) -> None:
+    """A venue approval form applies its current editable field values."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    _seed_pending_venue(store)
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/approvals/venues/example-club")
+
+    assert response.status_code == 200
+    assert "Suggested Street 1, 10115 Berlin" in response.text
+    assert 'name="address" value="Suggested Street 1, 10115 Berlin"' in response.text
+    assert 'name="website" value="https://suggested.example/"' in response.text
+    assert response.text.count('name="action" value="approve"') == 1
+    assert "Approve suggestion" not in response.text
+    assert "Approve edited fields" not in response.text
+
+
+def test_venue_approval_applies_candidate_filled_form(tmp_path) -> None:
+    """The single approval action persists values currently shown in the form."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    _seed_pending_venue(store)
+
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/approvals/venues/example-club",
+            data={
+                "action": "approve",
+                "provider": "nominatim",
+                "osm_type": "node",
+                "osm_id": "123",
+                "name": "Example Club",
+                "address": "Suggested Street 1, 10115 Berlin",
+                "postal_code": "10115",
+                "city": "Berlin",
+                "country": "DE",
+                "website": "https://suggested.example/",
+            },
+            follow_redirects=False,
+        )
+
+    approved = store.get_venue("example-club")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/approvals"
+    assert approved is not None
+    assert approved.status is VenueStatus.VERIFIED
+    assert approved.address == "Suggested Street 1, 10115 Berlin"
+    assert approved.website == "https://suggested.example/"
+
+
+def test_venue_approval_can_edit_multiple_suggested_fields(tmp_path) -> None:
+    """Edited approval validates and persists all reviewer-adjusted fields."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    _seed_pending_venue(store)
+
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/approvals/venues/example-club",
+            data={
+                "action": "approve",
+                "provider": "nominatim",
+                "osm_type": "node",
+                "osm_id": "123",
+                "name": "Example Club Berlin",
+                "address": "Corrected Road 9, 10999 Berlin",
+                "postal_code": "10999",
+                "city": "Berlin",
+                "country": "DE",
+                "website": "https://corrected.example/",
+            },
+            follow_redirects=False,
+        )
+
+    approved = store.get_venue("example-club")
+    assert response.status_code == 303
+    assert approved is not None
+    assert approved.name == "Example Club Berlin"
+    assert approved.address == "Corrected Road 9, 10999 Berlin"
+    assert approved.postal_code == "10999"
+    assert approved.website == "https://corrected.example/"
+    assert approved.status is VenueStatus.VERIFIED
+
+
+def test_venue_approval_rejects_invalid_edits_without_publishing_candidate(
+    tmp_path,
+) -> None:
+    """Validation failure leaves a candidate pending rather than partly approving it."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    _seed_pending_venue(store)
+
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/approvals/venues/example-club",
+            data={
+                "action": "approve",
+                "provider": "nominatim",
+                "osm_type": "node",
+                "osm_id": "123",
+                "name": "Example Club",
+                "address": "Suggested Street 1, 10115 Berlin",
+                "postal_code": "10115",
+                "city": "Berlin",
+                "country": "DE",
+                "website": "javascript:alert(1)",
+            },
+            follow_redirects=False,
+        )
+
+    venue = store.get_venue("example-club")
+    assert response.status_code == 400
+    assert venue is not None
+    assert venue.status is VenueStatus.CANDIDATE
+    assert venue.website is None
+
+
+def test_venue_approval_can_discover_suggestions_on_demand(
+    tmp_path, monkeypatch
+) -> None:
+    """An unresolved venue can request provider suggestions from its review form."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert_venue(
+        VenueRecord(
+            id="example-club",
+            name="Example Club",
+            normalized_name="example club",
+        )
+    )
+    suggestion = VenueCandidate(
+        venue_id="example-club",
+        provider="nominatim",
+        source_url="https://www.openstreetmap.org/node/123",
+        osm_type="node",
+        osm_id="123",
+        display_name="Example Club, Berlin, Germany",
+        address="Suggested Street 1, 10115 Berlin",
+        postal_code="10115",
+        website="https://suggested.example/",
+        latitude=52.5,
+        longitude=13.4,
+        confidence=0.8,
+        retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        "berlin_events_explorer.webapp.NominatimVenueProvider.discover",
+        lambda self, venue: [suggestion],
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/approvals/venues/example-club/discover", follow_redirects=False
+        )
+
+    venue = store.get_venue("example-club")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/approvals/venues/example-club"
+    assert venue is not None
+    assert venue.status is VenueStatus.CANDIDATE
+    assert store.list_venue_candidates("example-club") == [suggestion]
+
+
+def test_approval_refresh_never_auto_approves_high_confidence_suggestion(
+    tmp_path, monkeypatch
+) -> None:
+    """Manual refresh keeps even a high-confidence suggestion in the editorial queue."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert_venue(
+        VenueRecord(
+            id="example-club",
+            name="Example Club",
+            normalized_name="example club",
+        )
+    )
+    suggestion = VenueCandidate(
+        venue_id="example-club",
+        provider="nominatim",
+        source_url="https://www.openstreetmap.org/node/123",
+        osm_type="node",
+        osm_id="123",
+        display_name="Example Club, Berlin, Germany",
+        address="Suggested Street 1, 10115 Berlin",
+        postal_code="10115",
+        website="https://suggested.example/",
+        latitude=52.5,
+        longitude=13.4,
+        confidence=0.95,
+        retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    monkeypatch.setattr(
+        "berlin_events_explorer.webapp.NominatimVenueProvider.discover",
+        lambda self, venue: [suggestion],
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/approvals/venues/example-club/discover", follow_redirects=False
+        )
+
+    venue = store.get_venue("example-club")
+    assert response.status_code == 303
+    assert response.headers["location"] == "/approvals/venues/example-club"
+    assert venue is not None
+    assert venue.status is VenueStatus.CANDIDATE
+    assert venue.address is None
+    assert venue.website is None
+
+
+def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> None:
+    """Associated venue cells lead to a detail page with verified public fields."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    event = _seed_event()
+    store.upsert(event)
+    store.upsert_venue(
+        VenueRecord(
+            id="example-club",
+            name="Example Club",
+            normalized_name="example club",
+            address="Example Street 1, 10115 Berlin",
+            website="https://example.club/",
+            status=VenueStatus.VERIFIED,
+        )
+    )
+    store.link_event_venue(event.id, "example-club", source_name="Example Club")
+
+    app = create_app(database)
+    with TestClient(app) as client:
+        index_response = client.get("/?tab=recent")
+        detail_response = client.get("/venues/example-club")
+
+    assert index_response.status_code == 200
+    assert 'href="/venues/example-club"' in index_response.text
+    assert detail_response.status_code == 200
+    assert "Example Street 1, 10115 Berlin" in detail_response.text
+    assert 'href="https://example.club/"' in detail_response.text
+    assert 'rel="noopener noreferrer"' in detail_response.text
+    assert 'class="venue-map"' not in detail_response.text
+
+
+def test_venue_detail_embeds_openstreetmap_when_coordinates_are_available(
+    tmp_path,
+) -> None:
+    """A venue with verified coordinates displays an accessible interactive map."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert_venue(
+        VenueRecord(
+            id="example-club",
+            name="Example Club",
+            normalized_name="example club",
+            latitude=52.520008,
+            longitude=13.404954,
+            status=VenueStatus.VERIFIED,
+        )
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/venues/example-club")
+
+    assert response.status_code == 200
+    assert 'class="venue-map"' in response.text
+    assert 'title="Map showing Example Club"' in response.text
+    assert "https://www.openstreetmap.org/export/embed.html?" in response.text
+    assert "marker=52.520008%2C13.404954" in response.text
+    assert (
+        'href="https://www.openstreetmap.org/?mlat=52.520008&amp;mlon=13.404954'
+        in response.text
+    )
+
+
+def test_settings_page_updates_auto_approval_threshold(tmp_path) -> None:
+    """The settings page persists a validated threshold for future syncs."""
+
+    database = tmp_path / "events.sqlite"
+    app = create_app(database, auto_approve_threshold=0.9)
+    with TestClient(app) as client:
+        index_response = client.get("/")
+        settings_response = client.get("/settings")
+        save_response = client.post(
+            "/settings",
+            data={"auto_approve_threshold": "0.94"},
+            follow_redirects=False,
+        )
+
+    assert 'href="/settings"' in index_response.text
+    assert 'value="0.9"' in settings_response.text
+    assert save_response.status_code == 303
+    assert save_response.headers["location"] == "/settings?saved=1"
+    assert EventStore(database).get_setting("auto_approve_threshold") == 0.94
+
+
+def test_settings_page_rejects_threshold_outside_probability_range(tmp_path) -> None:
+    """Invalid confidence thresholds are explained without replacing the setting."""
+
+    database = tmp_path / "events.sqlite"
+    with TestClient(create_app(database)) as client:
+        response = client.post("/settings", data={"auto_approve_threshold": "1.5"})
+
+    assert response.status_code == 400
+    assert "between 0 and 1" in response.text
+    assert EventStore(database).get_setting("auto_approve_threshold") == 0.9
+
+
+def test_manual_sync_uses_threshold_saved_in_settings(tmp_path, monkeypatch) -> None:
+    """A saved threshold takes effect on the next sync without restarting the app."""
+
+    received: list[float] = []
+
+    def _fake_sync(
+        store: EventStore,
+        *,
+        auto_approve_threshold: float = 0.9,
+        progress=None,
+    ) -> None:
+        received.append(auto_approve_threshold)
+
+    monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _fake_sync)
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        client.post("/settings", data={"auto_approve_threshold": "0.96"})
+        response = client.post("/sync")
+
+    assert response.status_code == 200
+    assert received == [0.96]
+
+
+def test_development_settings_can_clear_content_but_preserve_threshold(
+    tmp_path,
+) -> None:
+    """The development-only reset empties content and keeps app configuration."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert(_seed_event())
+    app = create_app(database, environment="development")
+    with TestClient(app) as client:
+        settings_response = client.get("/settings")
+        reset_response = client.post("/settings/clear-database", follow_redirects=False)
+
+    assert "Clear development database" in settings_response.text
+    assert reset_response.status_code == 303
+    assert reset_response.headers["location"] == "/settings?cleared=1"
+    assert list(store.list_events()) == []
+    assert store.get_setting("auto_approve_threshold") == 0.9
+
+
+def test_production_settings_do_not_expose_database_reset(tmp_path) -> None:
+    """Production hides and rejects the destructive development reset action."""
+
+    app = create_app(tmp_path / "events.sqlite", environment="production")
+    with TestClient(app) as client:
+        settings_response = client.get("/settings")
+        reset_response = client.post("/settings/clear-database", follow_redirects=False)
+
+    assert "Clear development database" not in settings_response.text
+    assert reset_response.status_code == 404
 
 
 def test_webapp_sync_endpoint_runs_sync_and_returns_datastar_events(
@@ -264,7 +706,12 @@ def test_webapp_sync_endpoint_runs_sync_and_returns_datastar_events(
 
     database = tmp_path / "events.sqlite"
 
-    def _fake_sync(store: EventStore) -> None:
+    def _fake_sync(
+        store: EventStore,
+        *,
+        auto_approve_threshold: float = 0.9,
+        progress=None,
+    ) -> None:
         event = _seed_event().model_copy(update={"id": "evt-sync"})
         store.upsert(event)
 
@@ -288,6 +735,96 @@ def test_webapp_sync_endpoint_runs_sync_and_returns_datastar_events(
     assert event_lines[patch_index + 2] == ""
 
 
+def test_webapp_sync_endpoint_streams_venue_enrichment_progress(
+    tmp_path, monkeypatch
+) -> None:
+    """The manual sync stream reports venue lookup progress before completion."""
+
+    database = tmp_path / "events.sqlite"
+
+    def _fake_sync(
+        store: EventStore,
+        *,
+        auto_approve_threshold: float = 0.9,
+        progress=None,
+    ) -> None:
+        assert progress is not None
+        progress((0, 2, "Berghain"))
+        progress((1, 2, "Lido"))
+        progress((2, 2, None))
+
+    monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _fake_sync)
+
+    with TestClient(create_app(database)) as client:
+        response = client.post("/sync")
+
+    assert "Enriching venues (0 of 2): Berghain" in response.text
+    assert "Enriching venues (1 of 2): Lido" in response.text
+    assert 'value="1" max="2"' in response.text
+    assert "Venue enrichment complete (2 of 2)" in response.text
+
+
+def test_artist_approval_queue_and_verified_public_artist_page(tmp_path) -> None:
+    """Artists can be reviewed separately and only verified records get public pages."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert_artist(
+        ArtistRecord(
+            id="die-arzte",
+            name="Die Ärzte",
+            normalized_name="die ärzte",
+            status=ArtistStatus.CANDIDATE,
+        )
+    )
+    candidate = ArtistCandidate(
+        artist_id="die-arzte",
+        provider="musicbrainz",
+        source_url="https://musicbrainz.org/artist/11111111-1111-1111-1111-111111111111",
+        musicbrainz_id="11111111-1111-1111-1111-111111111111",
+        display_name="Die Ärzte",
+        artist_type="Group",
+        country="DE",
+        provider_score=100,
+        confidence=1.0,
+        retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+    store.record_artist_candidates([candidate])
+    store.save_artist_metadata(
+        ArtistMetadata(
+            artist_id="die-arzte",
+            field="official_homepage",
+            value="https://www.bademeister.com/",
+            provider="musicbrainz",
+            source_url=candidate.source_url,
+            confidence=1.0,
+            retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+        )
+    )
+
+    with TestClient(create_app(database)) as client:
+        queue = client.get("/approvals?entity_type=artists")
+        form = client.get("/approvals/artists/die-arzte")
+        public_before = client.get("/artists/die-arzte")
+        approved = client.post(
+            "/approvals/artists/die-arzte",
+            data={"candidate": candidate.musicbrainz_id},
+            follow_redirects=False,
+        )
+        public_after = client.get("/artists/die-arzte")
+
+    assert queue.status_code == 200
+    assert "Artists" in queue.text
+    assert 'href="/approvals/artists/die-arzte"' in queue.text
+    assert form.status_code == 200
+    assert "MusicBrainz" in form.text
+    assert public_before.status_code == 404
+    assert approved.status_code == 303
+    assert public_after.status_code == 200
+    assert "Die Ärzte" in public_after.text
+    assert "https://www.bademeister.com/" in public_after.text
+
+
 @pytest.mark.anyio
 async def test_periodic_sync_repeats_until_shutdown(monkeypatch, tmp_path) -> None:
     """The in-process scheduler should run sequential syncs until it is stopped."""
@@ -295,7 +832,7 @@ async def test_periodic_sync_repeats_until_shutdown(monkeypatch, tmp_path) -> No
     calls = 0
     completed_two_syncs = asyncio.Event()
 
-    def _fake_sync(_: EventStore) -> None:
+    def _fake_sync(_: EventStore, *, auto_approve_threshold: float = 0.9) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:

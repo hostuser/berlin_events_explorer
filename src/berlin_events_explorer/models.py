@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 from enum import Enum
+import re
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -37,6 +39,16 @@ class LinkType(str, Enum):
     VENUE = "venue"
     TICKETS = "tickets"
     OTHER = "other"
+
+
+class VenueStatus(str, Enum):
+    """Editorial state of a canonical venue record."""
+
+    UNRESOLVED = "unresolved"
+    CANDIDATE = "candidate"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    NOT_A_VENUE = "not_a_venue"
 
 
 class EventLink(BaseModel):
@@ -84,6 +96,166 @@ class Venue(BaseModel):
     website: str | None = None
     capacity: int | None = Field(default=None, ge=0)
     venue_type: str | None = None
+
+
+class VenueRecord(BaseModel):
+    """Canonical venue metadata independent of any individual event payload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    normalized_name: str
+    city: str | None = "Berlin"
+    country: str | None = "DE"
+    address: str | None = None
+    postal_code: str | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    website: str | None = None
+    osm_type: str | None = None
+    osm_id: str | None = None
+    status: VenueStatus = VenueStatus.UNRESOLVED
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    last_checked_at: datetime | None = None
+
+    @field_validator("id")
+    @classmethod
+    def id_must_be_a_slug(cls, value: str) -> str:
+        """Require a stable URL-safe primary key."""
+
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
+            raise ValueError("id must be a lowercase slug")
+        return value
+
+    @field_validator("website")
+    @classmethod
+    def website_must_be_http_url(cls, value: str | None) -> str | None:
+        """Allow only safe public website URLs."""
+
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("website must be an HTTP(S) URL")
+        return value
+
+
+class ArtistStatus(str, Enum):
+    """Editorial state of a canonical artist record."""
+
+    UNRESOLVED = "unresolved"
+    CANDIDATE = "candidate"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    NOT_AN_ARTIST = "not_an_artist"
+
+
+class ArtistRecord(BaseModel):
+    """Canonical artist metadata independent of any individual event payload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    name: str
+    normalized_name: str
+    artist_type: str | None = None
+    country: str | None = None
+    disambiguation: str | None = None
+    musicbrainz_id: str | None = None
+    musicbrainz_url: str | None = None
+    genres: list[str] = Field(default_factory=list)
+    status: ArtistStatus = ArtistStatus.UNRESOLVED
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    last_checked_at: datetime | None = None
+
+    @field_validator("id")
+    @classmethod
+    def id_must_be_a_slug(cls, value: str) -> str:
+        """Require a stable URL-safe primary key."""
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
+            raise ValueError("id must be a lowercase slug")
+        return value
+
+    @field_validator("musicbrainz_url")
+    @classmethod
+    def musicbrainz_url_must_be_http_url(cls, value: str | None) -> str | None:
+        """Allow only safe public MusicBrainz URLs."""
+        if value is None:
+            return None
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("musicbrainz_url must be an HTTP(S) URL")
+        return value
+
+
+class ArtistMetadata(BaseModel):
+    """Provenance for one selected canonical artist field."""
+
+    model_config = ConfigDict(frozen=True)
+
+    artist_id: str
+    field: str
+    value: Any
+    provider: str
+    source_url: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    retrieved_at: datetime | None = None
+
+
+class ArtistCandidate(BaseModel):
+    """A reviewable external candidate for one canonical artist."""
+
+    model_config = ConfigDict(frozen=True)
+
+    artist_id: str
+    provider: str
+    source_url: str
+    musicbrainz_id: str
+    display_name: str
+    artist_type: str | None = None
+    country: str | None = None
+    disambiguation: str | None = None
+    genres: list[str] = Field(default_factory=list)
+    provider_score: int | None = Field(default=None, ge=0, le=100)
+    confidence: float = Field(ge=0, le=1)
+    retrieved_at: datetime
+
+
+class VenueMetadata(BaseModel):
+    """Provenance for one selected canonical venue field."""
+
+    model_config = ConfigDict(frozen=True)
+
+    venue_id: str
+    field: str
+    value: Any
+    provider: str
+    source_url: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    retrieved_at: datetime | None = None
+
+
+class VenueCandidate(BaseModel):
+    """A reviewable external candidate for one canonical venue."""
+
+    model_config = ConfigDict(frozen=True)
+
+    venue_id: str
+    provider: str
+    source_url: str
+    osm_type: str
+    osm_id: str
+    display_name: str
+    address: str | None = None
+    postal_code: str | None = None
+    website: str | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    confidence: float = Field(ge=0, le=1)
+    retrieved_at: datetime
 
 
 class EnrichmentResult(BaseModel):

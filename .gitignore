@@ -13,3 +13,5 @@ pixi.lock
 **.egg-info/
 requirements.txt
 events.sqlite
+events.sqlite.*
+.hermes/

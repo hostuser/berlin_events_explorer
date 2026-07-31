@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import re
+import unicodedata
 from datetime import date, datetime, timezone
 from typing import Iterable
 
@@ -35,7 +36,9 @@ class MyTrueIntentSource:
     )
     required_columns = {"Date", "Note", "Artist", "Venue"}
 
-    def parse(self, content: str, fetched_at: datetime | None = None) -> SourceParseResult:
+    def parse(
+        self, content: str, fetched_at: datetime | None = None
+    ) -> SourceParseResult:
         """Parse CSV content, retaining row diagnostics without aborting the batch."""
         fetched_at = fetched_at or datetime.now(timezone.utc)
         reader = csv.DictReader(io.StringIO(content))
@@ -45,7 +48,7 @@ class MyTrueIntentSource:
             missing_columns = ", ".join(sorted(missing))
             raise ValueError(f"CSV is missing required columns: {missing_columns}")
 
-        events: list[Event] = []
+        events_by_id: dict[str, Event] = {}
         issues: list[SourceParseIssue] = []
         for row_number, row in enumerate(reader, start=2):
             raw = {key: (value or "").strip() for key, value in row.items()}
@@ -68,7 +71,8 @@ class MyTrueIntentSource:
                 raw_data=raw,
             )
             try:
-                events.append(self._to_event(raw_event))
+                event = self._to_event(raw_event)
+                events_by_id.setdefault(event.id, event)
             except ValueError as exc:
                 issues.append(
                     SourceParseIssue(
@@ -85,7 +89,7 @@ class MyTrueIntentSource:
                         },
                     )
                 )
-        return SourceParseResult(events=events, issues=issues)
+        return SourceParseResult(events=list(events_by_id.values()), issues=issues)
 
     def _to_event(self, raw: RawSourceEvent) -> Event:
         start_date, end_date, precision = _parse_date(raw.raw_date)
@@ -93,12 +97,10 @@ class MyTrueIntentSource:
         event_key = "|".join(
             [
                 raw.source_name,
-                raw.source_record_id or "",
-                f"{start_date.isoformat()}..{end_date.isoformat()}"
-                if end_date
-                else start_date.isoformat(),
-                raw.raw_artist,
-                raw.raw_venue,
+                start_date.isoformat(),
+                end_date.isoformat() if end_date else "",
+                _normalize_identity_component(raw.raw_artist),
+                _normalize_identity_component(raw.raw_venue),
             ]
         )
         event_id = hashlib.sha256(event_key.encode("utf-8")).hexdigest()
@@ -127,6 +129,12 @@ class MyTrueIntentSource:
             first_seen_at=raw.fetched_at,
             last_seen_at=raw.fetched_at,
         )
+
+
+def _normalize_identity_component(value: str) -> str:
+    """Normalize source text used to identify the same real-world event."""
+
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
 def _parse_status(note: str) -> EventStatus:

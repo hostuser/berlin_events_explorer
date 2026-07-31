@@ -9,6 +9,7 @@ from berlin_events_explorer.augment import augment_events
 from berlin_events_explorer.models import Event, EventSourceRef, Performer, Venue
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.sync import SyncResult
+from berlin_events_explorer.venue_ingestion import VenueIngestionResult
 
 
 def _seed_event_for_augmentation(store: EventStore) -> None:
@@ -117,19 +118,27 @@ def test_sync_cli_clear_cache_option(tmp_path, monkeypatch) -> None:
     def fake_open_sync_cache(*_args, **_kwargs) -> DummyCache:
         return cache
 
-    def fake_sync_source(
+    def fake_sync_source_and_ingest_venues(
         source,
         store,
         client,
         *,
         http_cache=None,
-    ) -> SyncResult:
+        auto_approve_threshold=0.9,
+    ) -> tuple[SyncResult, VenueIngestionResult]:
         assert http_cache is cache
         assert cache.cleared
-        return SyncResult(downloaded=True, created=0, updated=0, unchanged=0)
+        return (
+            SyncResult(downloaded=True, created=0, updated=0, unchanged=0),
+            VenueIngestionResult(0, 0, 0, 0, 0, 0),
+        )
 
     monkeypatch.setattr(cli_module, "open_sync_cache", fake_open_sync_cache)
-    monkeypatch.setattr(cli_module, "sync_source", fake_sync_source)
+    monkeypatch.setattr(
+        cli_module,
+        "sync_source_and_ingest_venues",
+        fake_sync_source_and_ingest_venues,
+    )
     monkeypatch.setattr(cli_module.httpx, "Client", DummyClient)
 
     runner = CliRunner()
@@ -180,19 +189,27 @@ def test_sync_cli_keeps_cache_by_default(tmp_path, monkeypatch) -> None:
     def fake_open_sync_cache(*_args, **_kwargs) -> DummyCache:
         return cache
 
-    def fake_sync_source(
+    def fake_sync_source_and_ingest_venues(
         source,
         store,
         client,
         *,
         http_cache=None,
-    ) -> SyncResult:
+        auto_approve_threshold=0.9,
+    ) -> tuple[SyncResult, VenueIngestionResult]:
         assert http_cache is cache
         assert not cache.cleared
-        return SyncResult(downloaded=True, created=0, updated=0, unchanged=0)
+        return (
+            SyncResult(downloaded=True, created=0, updated=0, unchanged=0),
+            VenueIngestionResult(0, 0, 0, 0, 0, 0),
+        )
 
     monkeypatch.setattr(cli_module, "open_sync_cache", fake_open_sync_cache)
-    monkeypatch.setattr(cli_module, "sync_source", fake_sync_source)
+    monkeypatch.setattr(
+        cli_module,
+        "sync_source_and_ingest_venues",
+        fake_sync_source_and_ingest_venues,
+    )
     monkeypatch.setattr(cli_module.httpx, "Client", DummyClient)
 
     runner = CliRunner()

@@ -23,9 +23,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - uses: ariga/setup-atlas@v0
       - uses: ./.github/actions/setup-uv-env
         with:
           python-version: ${{ matrix.python_version }}
+      - name: validate Atlas migration history
+        run: atlas migrate validate --dir file://src/berlin_events_explorer/db_migrations
       - name: test with pytest
         run: uv run pytest --cov-report=xml --cov=berlin_events_explorer tests
 

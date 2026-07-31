@@ -1,6 +1,6 @@
 """Tests for the canonical event models."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -12,6 +12,10 @@ from berlin_events_explorer.models import (
     EventStatus,
     Performer,
     Venue,
+    VenueCandidate,
+    VenueMetadata,
+    VenueRecord,
+    VenueStatus,
 )
 
 
@@ -62,3 +66,96 @@ def test_event_rejects_reversed_date_range(source_ref: EventSourceRef) -> None:
             end_date=date(2026, 7, 13),
             title="Example show",
         )
+
+
+def test_venue_record_preserves_verified_public_metadata() -> None:
+    """Canonical venues retain independently verified public details."""
+
+    venue = VenueRecord(
+        id="berghain",
+        name="Berghain",
+        normalized_name="berghain",
+        address="Am Wriezener Bahnhof, 10243 Berlin",
+        postal_code="10243",
+        latitude=52.5112,
+        longitude=13.4437,
+        website="https://www.berghain.berlin/",
+        status=VenueStatus.VERIFIED,
+    )
+
+    assert venue.id == "berghain"
+    assert venue.website == "https://www.berghain.berlin/"
+    assert venue.status is VenueStatus.VERIFIED
+
+
+def test_venue_metadata_records_field_level_provenance() -> None:
+    """Venue metadata must retain the source that supplied each field."""
+
+    metadata = VenueMetadata(
+        venue_id="berghain",
+        field="address",
+        value="Am Wriezener Bahnhof, 10243 Berlin",
+        provider="openstreetmap",
+        source_url="https://www.openstreetmap.org/node/123",
+        confidence=0.98,
+        retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+
+    assert metadata.field == "address"
+    assert metadata.confidence == 0.98
+
+
+@pytest.mark.parametrize("venue_id", ["", "Berghain", "berghain!", "two words"])
+def test_venue_record_rejects_non_slug_ids(venue_id: str) -> None:
+    """Venue IDs are stable, route-safe lowercase slugs."""
+
+    with pytest.raises(ValidationError, match="slug"):
+        VenueRecord(id=venue_id, name="Berghain", normalized_name="berghain")
+
+
+def test_venue_record_rejects_non_http_homepage() -> None:
+    """Only public HTTP(S) venue homepages are accepted."""
+
+    with pytest.raises(ValidationError, match="HTTP"):
+        VenueRecord(
+            id="berghain",
+            name="Berghain",
+            normalized_name="berghain",
+            website="mailto:hello@example.test",
+        )
+
+
+def test_not_a_venue_record_does_not_require_public_metadata() -> None:
+    """Source placeholders can be represented without inventing venue details."""
+
+    venue = VenueRecord(
+        id="tba",
+        name="TBA",
+        normalized_name="tba",
+        status=VenueStatus.NOT_A_VENUE,
+    )
+
+    assert venue.address is None
+    assert venue.website is None
+
+
+def test_venue_candidate_retains_osm_identity_and_discovered_details() -> None:
+    """Unselected OSM candidates remain reviewable independently of a venue."""
+
+    candidate = VenueCandidate(
+        venue_id="berghain",
+        provider="nominatim",
+        source_url="https://www.openstreetmap.org/node/1",
+        osm_type="node",
+        osm_id="1",
+        display_name="Berghain, Friedrichshain-Kreuzberg, Berlin, Deutschland",
+        address="Am Wriezener Bahnhof, 10243 Berlin",
+        website="https://www.berghain.berlin/",
+        latitude=52.5112,
+        longitude=13.4437,
+        confidence=0.98,
+        retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+    )
+
+    assert candidate.osm_id == "1"
+    assert candidate.address == "Am Wriezener Bahnhof, 10243 Berlin"
