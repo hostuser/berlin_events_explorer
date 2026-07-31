@@ -22,6 +22,7 @@ from berlin_events_explorer.models import (
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.webapp import (
     _get_app_version,
+    _events_on_date,
     _paginate_events,
     _recent_events,
     _periodic_sync,
@@ -122,6 +123,77 @@ def test_render_events_page_renders_table_rows() -> None:
     assert "?page=2&page_size=25" in page
     assert "Recently added" in page
     assert "Upcoming" in page
+    assert '<a class="date-link" href="/dates/2026-07-01">2026-07-01</a>' in page
+
+
+def test_events_on_date_includes_events_within_a_date_range() -> None:
+    """A date view should include single-day and overlapping multi-day events."""
+
+    single_day = _seed_event().model_copy(
+        update={"id": "single", "start_date": date(2026, 7, 10)}
+    )
+    multi_day = _seed_event().model_copy(
+        update={
+            "id": "multi",
+            "start_date": date(2026, 7, 9),
+            "end_date": date(2026, 7, 11),
+        }
+    )
+    other_day = _seed_event().model_copy(
+        update={"id": "other", "start_date": date(2026, 7, 12)}
+    )
+
+    matching = _events_on_date(
+        [other_day, multi_day, single_day], target_date=date(2026, 7, 10)
+    )
+
+    assert [event.id for event in matching] == ["multi", "single"]
+
+
+def test_webapp_date_route_lists_only_events_on_requested_date(tmp_path) -> None:
+    """The date route should render matching events and link back to the index."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert(
+        _seed_event().model_copy(
+            update={
+                "id": "matching",
+                "title": "Matching Event",
+                "start_date": date(2026, 7, 10),
+            }
+        )
+    )
+    store.upsert(
+        _seed_event().model_copy(
+            update={
+                "id": "earlier",
+                "title": "Earlier Event",
+                "start_date": date(2026, 7, 9),
+            }
+        )
+    )
+    store.upsert(
+        _seed_event().model_copy(
+            update={
+                "id": "other",
+                "title": "Other Event",
+                "start_date": date(2026, 7, 11),
+            }
+        )
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/dates/2026-07-10")
+        invalid_response = client.get("/dates/not-a-date")
+
+    assert response.status_code == 200
+    assert "Events on 2026-07-10" in response.text
+    assert "Matching Event" in response.text
+    assert "Earlier Event" not in response.text
+    assert "Other Event" not in response.text
+    assert 'href="/"' in response.text
+    assert invalid_response.status_code == 404
 
 
 def test_render_events_panel_renders_empty_state() -> None:

@@ -307,6 +307,32 @@ def create_app(
         )
         return Response(content=html, media_type="text/html")
 
+    @get("/dates/{event_date:str}", sync_to_thread=True)
+    def date_events(event_date: str) -> Response:
+        """Render all events happening on one calendar date."""
+
+        try:
+            target_date = date.fromisoformat(event_date)
+        except ValueError:
+            return Response(
+                content="<h1>Date not found</h1>",
+                media_type="text/html",
+                status_code=404,
+            )
+        events = _events_on_date(list(store.list_events()), target_date=target_date)
+        event_ids = [event.id for event in events]
+        return Response(
+            content=_render_date_events_page(
+                target_date,
+                events,
+                venue_ids_by_event=store.get_venue_ids_for_events(event_ids),
+                artist_ids_by_event_performer=_verified_artist_ids_by_event_performer(
+                    store, event_ids
+                ),
+            ),
+            media_type="text/html",
+        )
+
     @get("/venues", sync_to_thread=True)
     def venues() -> Response:
         """Render the public venue catalog with event counts."""
@@ -678,6 +704,7 @@ def create_app(
     return Litestar(
         route_handlers=[
             index,
+            date_events,
             venues,
             venue_detail,
             artist_detail,
@@ -1457,6 +1484,96 @@ def render_events_page(
 """
 
 
+def _render_date_events_page(
+    target_date: date,
+    events: list[Event],
+    *,
+    venue_ids_by_event: dict[str, str] | None = None,
+    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+) -> str:
+    """Render the complete event list for one calendar date."""
+
+    venue_ids_by_event = venue_ids_by_event or {}
+    artist_ids_by_event_performer = artist_ids_by_event_performer or {}
+    rows = "".join(
+        _render_event_row(
+            event,
+            venue_id=venue_ids_by_event.get(event.id),
+            artist_ids_by_billing_order={
+                billing_order: artist_id
+                for (
+                    event_id,
+                    billing_order,
+                ), artist_id in artist_ids_by_event_performer.items()
+                if event_id == event.id
+            },
+        )
+        for event in events
+    )
+    event_label = "event" if len(events) == 1 else "events"
+    empty_state = (
+        '<p class="empty-state">No events are listed for this date.</p>'
+        if not events
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Events on {target_date.isoformat()} · Berlin Events Explorer</title>
+    <style>
+      :root {{ --surface:#fff; --text:#0f172a; --muted:#64748b; --primary:#2563eb;
+        --line:#d5dbe8; }}
+      * {{ box-sizing:border-box; }}
+      body {{ margin:0; color:var(--text); background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%);
+        font-family:Inter,"Segoe UI",Roboto,sans-serif; }}
+      main {{ max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }}
+      a {{ color:var(--primary); }}
+      .page-kicker {{ margin:0 0 .3rem; color:var(--primary); font-size:.82rem;
+        font-weight:700; letter-spacing:.08em; text-transform:uppercase; }}
+      h1 {{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
+      .back-link {{ display:inline-block; margin-bottom:1.25rem; }}
+      .meta {{ color:var(--muted); font-size:.95rem; margin:.55rem 0 1.1rem; }}
+      .card {{ background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
+        padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }}
+      .empty-state {{ color:var(--muted); margin:.35rem 0; }}
+      table {{ width:100%; border-collapse:collapse; font-size:.95rem; }}
+      th,td {{ text-align:left; vertical-align:top; padding:.6rem .5rem; border-bottom:1px solid var(--line); }}
+      th {{ color:#334155; font-weight:650; }}
+      .date-link {{ white-space:nowrap; font-variant-numeric:tabular-nums; }}
+      tbody tr:hover td {{ background:#f8fafc; }}
+      tbody tr:last-child td {{ border-bottom:none; }}
+      @media (max-width:720px) {{
+        main {{ padding:1rem .75rem 2rem; }}
+        table,thead,tbody,tr,th,td {{ display:block; }}
+        thead {{ display:none; }}
+        tbody tr {{ margin-bottom:.7rem; border:1px solid var(--line); border-radius:.7rem; overflow:hidden; }}
+        tbody tr td {{ padding:.45rem .65rem; border-bottom:1px solid var(--line); }}
+        tbody tr td::before {{ content:attr(data-label); display:block; color:var(--muted);
+          font-size:.78rem; margin-bottom:.2rem; letter-spacing:.04em; text-transform:uppercase; }}
+        tbody tr td:last-child {{ border-bottom:none; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="page-kicker">Berlin Events</p>
+      <a class="back-link" href="/">← Back to events</a>
+      <h1>Events on {target_date.isoformat()}</h1>
+      <p class="meta">{len(events)} {event_label} on this date.</p>
+      <section class="card" aria-label="Events on {target_date.isoformat()}">
+        {empty_state}
+        <table>
+          <thead><tr><th>Start date</th><th>Title</th><th>Venue</th><th>Performers</th><th>Tags</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
 def _render_venues_page(summaries: list[VenueSummary]) -> str:
     """Render the venue catalog and its client-side name filter."""
 
@@ -2050,6 +2167,25 @@ def _events_for_tab(events: list[Event], *, tab: str, recent_days: int) -> list[
     return _upcoming_events(events)
 
 
+def _events_on_date(events: list[Event], *, target_date: date) -> list[Event]:
+    """Return events whose date or date range includes the requested date."""
+
+    return _sorted_events(
+        [
+            event
+            for event in events
+            if event.start_date is not None
+            and (
+                event.start_date == target_date
+                or (
+                    event.end_date is not None
+                    and event.start_date <= target_date <= event.end_date
+                )
+            )
+        ]
+    )
+
+
 def _render_tabs(*, tab: str, recent_days: int) -> str:
     """Render navigation and the recent-events timeframe control."""
 
@@ -2091,6 +2227,11 @@ def _render_event_row(
     """Render one event row for the HTML table."""
 
     event_date = event.start_date.isoformat() if event.start_date else "TBA"
+    date_cell = (
+        f'<a class="date-link" href="/dates/{event_date}">{event_date}</a>'
+        if event.start_date
+        else event_date
+    )
     date_added = (
         event.first_seen_at.date().isoformat() if event.first_seen_at else "TBA"
     )
@@ -2115,7 +2256,7 @@ def _render_event_row(
 
     return (
         "<tr>"
-        f'<td data-label="Start date">{event_date}</td>'
+        f'<td data-label="Start date">{date_cell}</td>'
         f"{date_added_cell}"
         f'<td data-label="Title">{title}</td>'
         f'<td data-label="Venue">{venue}</td>'
