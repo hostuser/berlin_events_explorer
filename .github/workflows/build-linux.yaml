@@ -54,14 +54,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: astral-sh/ruff-action@v3
-        with:
-          version: "latest"
-          args: "--version"
+      - uses: ./.github/actions/setup-uv-env
       - name: Run ruff check
-        run: ruff check src/
-      - name: Run ruff check
-        run: ruff format --check --diff src/
+        run: uv run ruff check src/
+      - name: Run ruff format check
+        run: uv run ruff format --check --diff src/
 
   build_python_package:
     name: build python package

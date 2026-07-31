@@ -17,4 +17,4 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
       - name: Test with pytest
-        run: make tests
+        run: uv run pytest tests -s
