@@ -1,11 +1,25 @@
 """Tests for the versioned Atlas SQLite migration workflow."""
 
 import sqlite3
+from pathlib import PureWindowsPath
 
 from click.testing import CliRunner
 
 from berlin_events_explorer.cli import cli
-from berlin_events_explorer.migrations import migrate_database
+from berlin_events_explorer.migrations import (
+    _atlas_file_url,
+    _atlas_sqlite_url,
+    migrate_database,
+)
+
+
+def test_atlas_urls_keep_windows_drive_paths_valid() -> None:
+    """Atlas file URLs must not add a slash before a Windows drive letter."""
+
+    path = PureWindowsPath("D:/workspace/db_migrations")
+
+    assert _atlas_file_url(path) == "file://D:/workspace/db_migrations"
+    assert _atlas_sqlite_url(path) == "sqlite://D:/workspace/db_migrations"
 
 
 def test_migrate_database_creates_current_schema_and_records_revision(tmp_path) -> None:
