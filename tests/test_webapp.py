@@ -447,7 +447,11 @@ def test_sorted_events_orders_by_date_then_title() -> None:
 
     second = _seed_event().model_copy(update={"id": "evt-2", "title": "A later title"})
     first = _seed_event().model_copy(
-        update={"id": "evt-3", "title": "Z title", "start_date": date(2026, 8, 1)}
+        update={
+            "id": "evt-3",
+            "title": "Z title",
+            "start_date": date.today() + timedelta(days=2),
+        }
     )
 
     sorted_events = _sorted_events([first, second])
