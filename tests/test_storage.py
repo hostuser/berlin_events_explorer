@@ -485,3 +485,57 @@ def test_search_text_is_backfilled_for_legacy_rows(tmp_path) -> None:
 
     assert total == 1
     assert [event.id for event in events] == ["legacy"]
+
+
+def test_empty_snapshot_does_not_wipe_provider_events(tmp_path) -> None:
+    """A parseable but empty source batch must not delete the whole catalog."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.upsert(_event())
+
+    deleted = store.delete_events_not_in(provider="test", event_ids=set())
+
+    assert deleted == 0
+    assert [event.id for event in store.list_events()] == ["event-1"]
+    assert any(
+        entry.event == "empty_snapshot_deletion_skipped" and entry.level == "warning"
+        for entry in store.list_logs()
+    )
+
+
+def test_empty_snapshot_with_no_stored_events_stays_quiet(tmp_path) -> None:
+    """An empty snapshot over an empty catalog needs no warning."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+
+    deleted = store.delete_events_not_in(provider="test", event_ids=set())
+
+    assert deleted == 0
+    assert store.list_logs() == []
+
+
+def test_update_preserves_original_first_seen_timestamp(tmp_path) -> None:
+    """Content changes must not reset when an event was first observed."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    first_seen = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    original = _query_event(
+        "evt-first-seen",
+        title="Original Title",
+        start_date=date.today() + timedelta(days=3),
+        first_seen_at=first_seen,
+    )
+    store.upsert(original)
+
+    changed = original.model_copy(
+        update={
+            "title": "Changed Title",
+            "first_seen_at": datetime(2026, 7, 30, 12, 0, tzinfo=UTC),
+        }
+    )
+    result = store.upsert(changed)
+
+    stored = store.list_events()[0]
+    assert result.action == "updated"
+    assert stored.title == "Changed Title"
+    assert stored.first_seen_at == first_seen

@@ -616,6 +616,10 @@ class EventStore:
             changes = {"event": {"old": None, "new": payload}}
         else:
             old_payload = existing["event_json"]
+            # The stored first-seen timestamp is authoritative; a re-parsed
+            # payload always carries the current fetch time instead.
+            if old_payload.get("first_seen_at"):
+                payload["first_seen_at"] = old_payload["first_seen_at"]
             changes = _diff_payload(
                 _comparison_payload(old_payload),
                 _comparison_payload(payload),
@@ -1523,7 +1527,11 @@ class EventStore:
         event_ids: set[str],
         connection: Connection | None = None,
     ) -> int:
-        """Delete provider events absent from a successfully parsed source snapshot."""
+        """Delete provider events absent from a successfully parsed source snapshot.
+
+        An empty snapshot is treated as suspect: rather than wiping the whole
+        provider catalog, nothing is deleted and a warning is logged.
+        """
 
         stale_ids = select(events_table.c.id).where(events_table.c.provider == provider)
         statement = delete(events_table).where(events_table.c.provider == provider)
@@ -1532,6 +1540,20 @@ class EventStore:
             statement = statement.where(events_table.c.id.not_in(event_ids))
 
         def _delete(conn: Connection) -> int:
+            if not event_ids:
+                existing = self.count_events(provider, connection=conn)
+                if existing:
+                    self.log(
+                        level="warning",
+                        event="empty_snapshot_deletion_skipped",
+                        message=(
+                            f"Source {provider} returned no events; keeping "
+                            f"{existing} stored events instead of deleting them."
+                        ),
+                        context={"provider": provider, "stored_events": existing},
+                        connection=conn,
+                    )
+                return 0
             conn.execute(
                 delete(event_venues_table).where(
                     event_venues_table.c.event_id.in_(stale_ids)
