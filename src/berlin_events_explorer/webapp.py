@@ -198,7 +198,7 @@ def _render_login_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Editor login · Berlin Events Explorer</title>
-    {theme.stylesheet_link()}
+    {theme.head_assets()}
   </head>
   <body class="login-page">
     <main>
@@ -1486,7 +1486,7 @@ def _render_settings_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Settings · Berlin Events Explorer</title>
-    {theme.stylesheet_link()}
+    {theme.head_assets()}
   </head>
   <body class="settings-page">
     <main>
@@ -1621,7 +1621,7 @@ def _render_venue_approval_form(
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Approve {escape(venue.name)} · Berlin Events Explorer</title>
-{theme.stylesheet_link()}</head><body class="approval-page"><main>
+{theme.head_assets()}</head><body class="approval-page"><main>
 <p><a href="{back_href}">← {back_label}</a></p><p class="kicker">Venue approval</p>
 <h1>{escape(venue.name)}</h1><p class="muted">Choose a suggestion or enter the venue details manually, then review and approve the form.</p>
 {error_html}<section class="events-section" aria-labelledby="venue-events-heading">
@@ -1685,7 +1685,7 @@ def _render_artist_approval_form(
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Review {escape(artist.name)} · Berlin Events Explorer</title>{theme.stylesheet_link()}</head>
+<title>Review {escape(artist.name)} · Berlin Events Explorer</title>{theme.head_assets()}</head>
 <body class="approval-page"><main><p><a href="{back_href}">← {back_label}</a></p>
 <p class="kicker">Artist review</p><h1>{escape(artist.name)}</h1>
 <p class="muted">Choose a suggestion if needed, edit the public fields, then approve the changes.</p>{error_html}
@@ -1768,7 +1768,7 @@ def _render_artist_detail_page(
     )
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{escape(artist.name)} · Berlin Events Explorer</title>{theme.stylesheet_link()}</head>
+<title>{escape(artist.name)} · Berlin Events Explorer</title>{theme.head_assets()}</head>
 <body class="detail-page"><main><p><a href="/">← Back to events</a></p><section class="card">
 <div class="detail-header"><div><p>Berlin artist</p><h1>{escape(artist.name)}</h1></div>
 <a class="action-button" href="/approvals/artists/{escape(artist.id, quote=True)}">Edit</a></div>
@@ -1804,7 +1804,7 @@ def _render_date_events_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Events on {target_date.isoformat()} · Berlin Events Explorer</title>
-    {theme.stylesheet_link()}
+    {theme.head_assets()}
   </head>
   <body class="date-page">
     <main>
@@ -1876,7 +1876,7 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{escape(venue.name)} · Berlin Events Explorer</title>
-    {theme.stylesheet_link()}
+    {theme.head_assets()}
   </head>
   <body class="detail-page">
     <main>
@@ -2651,7 +2651,7 @@ def _render_app_page(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{escape(title)}</title>
     <script type="module" src="{DATASTAR_SCRIPT}"></script>
-    {theme.stylesheet_link()}
+    {theme.head_assets()}
   </head>
   <body class="app-page">
     <main class="events-app" data-signals='{serialized_signals}'>

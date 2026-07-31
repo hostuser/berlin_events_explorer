@@ -1,10 +1,43 @@
 """Tests for the consolidated Fahrplan stylesheet and its delivery."""
 
+import re
+
 import pytest
 from litestar.testing import TestClient
 
 from berlin_events_explorer import theme
 from berlin_events_explorer.webapp import create_app
+
+
+def _relative_luminance(hex_color: str) -> float:
+    channels = [int(hex_color.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [
+        c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels
+    ]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(color_a: str, color_b: str) -> float:
+    brighter, darker = sorted(
+        (_relative_luminance(color_a), _relative_luminance(color_b)), reverse=True
+    )
+    return (brighter + 0.05) / (darker + 0.05)
+
+
+def test_token_pairs_meet_wcag_contrast() -> None:
+    """Every §3.3 light-theme pair meets its WCAG 2.2 AA requirement."""
+
+    for name_a, name_b, minimum in theme.CONTRAST_PAIRS:
+        ratio = _contrast(theme._TOKEN_VALUES[name_a], theme._TOKEN_VALUES[name_b])
+        assert ratio >= minimum, f"{name_a} on {name_b}: {ratio:.2f} < {minimum}"
+
+
+def test_no_hex_literals_outside_token_layer() -> None:
+    """A hex literal outside the tokens layer is a defect (§3.4)."""
+
+    css = theme.stylesheet()
+    body = css.split("@layer base", 1)[1]
+    assert not re.findall(r"#[0-9a-fA-F]{3,8}\b", body)
 
 
 @pytest.mark.parametrize(
