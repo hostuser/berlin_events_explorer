@@ -191,7 +191,31 @@ def test_render_events_page_renders_table_rows() -> None:
     assert "?page=2&amp;page_size=25" in page
     assert "Recently added" in page
     assert "Upcoming" in page
-    assert '<a class="date-link" href="/dates/2026-07-01">2026-07-01</a>' in page
+    assert 'class="date-link" href="/dates/2026-07-01"' in page
+    assert 'datetime="2026-07-01"' in page
+
+
+def test_format_date_is_weekday_first_english() -> None:
+    """Human dates read weekday-first (§9.2), independent of locale."""
+
+    assert webapp._format_date(date(2026, 3, 12)) == "Thu 12 Mar 2026"
+    assert webapp._format_date(date(2026, 3, 12), with_year=False) == "Thu 12 Mar"
+
+
+def test_plural_helper_keeps_pluralization_in_one_place() -> None:
+    assert webapp._plural(1, "event") == "1 event"
+    assert webapp._plural(2, "event") == "2 events"
+    assert webapp._plural(0, "suggestion") == "0 suggestions"
+
+
+def test_event_rows_render_dates_inside_time_elements() -> None:
+    """The machine date survives in <time datetime=…>; humans see the stamp."""
+
+    page = _render_events_page_from(
+        _seed_events(1), total_count=1, page=1, page_size=10
+    )
+    assert '<time class="date-stamp" datetime="' in page
+    assert 'class="date-stamp__weekday"' in page
 
 
 def test_event_search_emits_its_sse_response_as_one_chunk(
@@ -301,8 +325,23 @@ def test_render_events_panel_renders_empty_state() -> None:
         total_pages=1,
     )
 
-    assert "No events have been synced yet." in html
+    assert "No events yet. Sync to pull the current Berlin listings." in html
     assert '<table class="event-table">' in html
+
+
+def test_render_events_panel_distinguishes_filtered_empty_state() -> None:
+    """Zero results from a filter is a different situation than never-synced."""
+
+    html = _render_events_panel(
+        [],
+        total_count=0,
+        page=1,
+        page_size=50,
+        total_pages=1,
+        search="nosuchband",
+    )
+
+    assert "No events match this filter." in html
 
 
 def test_recent_events_panel_includes_date_added_column() -> None:
@@ -321,7 +360,7 @@ def test_recent_events_panel_includes_date_added_column() -> None:
     )
 
     assert "<th>Date added</th>" in html
-    assert 'data-label="Date added">2026-07-12</td>' in html
+    assert 'data-label="Date added"><time datetime="2026-07-12">' in html
 
 
 def test_event_panel_uses_stable_scroll_viewport_and_footer() -> None:
@@ -1143,7 +1182,7 @@ def test_venues_page_lists_districts_event_counts_and_case_insensitive_filter(
     assert 'name="search"' in response.text
 
     rendered_empty = _render_venues_page([])
-    assert "No venues have been synced yet." in rendered_empty
+    assert "No venues yet. Venues appear after the first sync." in rendered_empty
 
 
 def test_venues_search_filters_before_pagination(tmp_path) -> None:

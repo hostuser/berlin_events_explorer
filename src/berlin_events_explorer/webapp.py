@@ -1531,6 +1531,54 @@ def _render_settings_page(
     )
 
 
+# English abbreviations by table, not strftime: %a/%b depend on the process
+# locale, and the UI locale is English regardless of the host (§9.1-9.2).
+_WEEKDAY_ABBREVIATIONS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_MONTH_ABBREVIATIONS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _format_date(value: date, *, with_year: bool = True) -> str:
+    """Format a date for humans: weekday first, this is a schedule (§9.2)."""
+
+    weekday = _WEEKDAY_ABBREVIATIONS[value.weekday()]
+    month = _MONTH_ABBREVIATIONS[value.month - 1]
+    formatted = f"{weekday} {value.day} {month}"
+    return f"{formatted} {value.year}" if with_year else formatted
+
+
+def _render_time(value: date, *, with_year: bool = True) -> str:
+    """Render a date inside ``<time>`` so the machine value survives (§9.2)."""
+
+    return (
+        f'<time datetime="{value.isoformat()}">'
+        f"{_format_date(value, with_year=with_year)}</time>"
+    )
+
+
+def _render_date_stamp(value: date | None) -> str:
+    """Render a table lead cell's date stamp: weekday over DD Mon (§7.2)."""
+
+    if value is None:
+        return '<span class="date-stamp date-stamp--tba">TBA</span>'
+    weekday = _WEEKDAY_ABBREVIATIONS[value.weekday()]
+    month = _MONTH_ABBREVIATIONS[value.month - 1]
+    return (
+        f'<time class="date-stamp" datetime="{value.isoformat()}">'
+        f'<span class="date-stamp__weekday">{weekday}</span>'
+        f'<span class="date-stamp__date">{value.day:02d} {month}</span></time>'
+    )
+
+
+def _plural(count: int, singular: str, plural: str | None = None) -> str:
+    """Return ``"<count> <word>"`` with English pluralization in one place."""
+
+    word = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {word}"
+
+
 _STAMP_TONES = {"neutral", "success", "warn", "danger"}
 _STATUS_STAMP_TONES = {
     "verified": "success",
@@ -1776,11 +1824,15 @@ def _render_artist_detail_page(
     genres = ", ".join(escape(genre) for genre in artist.genres) or "Not listed"
     event_items = (
         "".join(
-            f"<li>{escape(event.start_date.isoformat() if event.start_date else 'TBA')} — {escape(event.title)}</li>"
+            f"<li>{_render_time(event.start_date) if event.start_date else 'TBA'}"
+            f" — {escape(event.title)}</li>"
             for event in events
         )
         or "<li>No associated events yet.</li>"
     )
+    # i18n note (§9.1): provider prose (event descriptions, artist blurbs) must
+    # be wrapped in lang="de" if it is ever rendered; no such prose reaches the
+    # UI today, so nothing carries the attribute.
     content = f"""<div class="detail-stack"><section class="card detail-card" aria-label="Artist details">
 <p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p>
 <p class="artist-links"><strong>Listen &amp; watch:</strong> {platform_links}</p>
@@ -1816,16 +1868,16 @@ def _render_date_events_page(
         artist_ids_by_event_performer=artist_ids_by_event_performer,
         empty_text="No events are listed for this date.",
     )
-    event_label = "event" if len(events) == 1 else "events"
-    content = f"""<p class="meta">{len(events)} {event_label} on this date.</p>
+    content = f"""<p class="meta">{_plural(len(events), "event")} on this date.</p>
       <section class="card" aria-label="Events on {target_date.isoformat()}">
         {event_table}
       </section>"""
+    # URLs and <title> keep the ISO form (§9.2); only the heading is human.
     return _render_app_page(
         title=f"Events on {target_date.isoformat()} · Berlin Events Explorer",
         active_tab="date",
         content=content,
-        heading=f"Events on {target_date.isoformat()}",
+        heading=f"Events on {_format_date(target_date)}",
         kicker="Berlin events",
         show_sync=False,
     )
@@ -2190,7 +2242,7 @@ def _render_event_table(
     tab: str = "upcoming",
     show_start_date: bool = True,
     show_venue: bool = True,
-    empty_text: str = "No events have been synced yet.",
+    empty_text: str = "No events yet. Sync to pull the current Berlin listings.",
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
 ) -> str:
@@ -2250,9 +2302,17 @@ def _render_events_panel(
 ) -> str:
     """Render the event table section used for live updates."""
 
+    # Zero results from a filter is a different situation than never-synced
+    # (§7.9): name the situation, offer the action.
+    empty_text = (
+        "No events match this filter."
+        if search
+        else "No events yet. Sync to pull the current Berlin listings."
+    )
     event_table = _render_event_table(
         events,
         tab=tab,
+        empty_text=empty_text,
         venue_ids_by_event=venue_ids_by_event,
         artist_ids_by_event_performer=artist_ids_by_event_performer,
     )
@@ -2448,14 +2508,16 @@ def _render_event_row(
 ) -> str:
     """Render one event row for the HTML table."""
 
-    event_date = event.start_date.isoformat() if event.start_date else "TBA"
     date_cell = (
-        f'<a class="date-link" href="/dates/{event_date}">{event_date}</a>'
+        f'<a class="date-link" href="/dates/{event.start_date.isoformat()}">'
+        f"{_render_date_stamp(event.start_date)}</a>"
         if event.start_date
-        else event_date
+        else _render_date_stamp(None)
     )
     date_added = (
-        event.first_seen_at.date().isoformat() if event.first_seen_at else "TBA"
+        _render_time(event.first_seen_at.date(), with_year=False)
+        if event.first_seen_at
+        else "TBA"
     )
     title = escape(event.title)
     venue_name = escape(event.venue.name) if event.venue else "TBA"
@@ -2871,21 +2933,25 @@ def _render_venues_content(
     for summary in displayed_summaries:
         venue = summary.venue
         district = venue.district or "Not listed"
-        event_label = "event" if summary.event_count == 1 else "events"
+        event_count_label = _plural(summary.event_count, "event")
         rows += (
             '<tr class="venue-row" data-venue-row '
             f'data-venue-href="/venues/{escape(venue.id, quote=True)}">'
             f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">{escape(venue.name)}</a></td>'
             f'<td data-label="District">{escape(district)}</td>'
-            f'<td data-label="Events">{summary.event_count} {event_label}</td>'
+            f'<td data-label="Events">{event_count_label}</td>'
             "</tr>"
         )
 
-    empty_table = (
-        '<p class="empty-state">No venues have been synced yet.</p>'
-        if not summaries
-        else ""
-    )
+    if not summaries:
+        empty_table = (
+            '<p class="empty-state">No venues yet. '
+            "Venues appear after the first sync.</p>"
+        )
+    elif not filtered_summaries:
+        empty_table = '<p class="empty-state">No venues match this filter.</p>'
+    else:
+        empty_table = ""
     start_index = (current_page - 1) * normalized_page_size + 1 if total_venues else 0
     end_index = min(
         (current_page - 1) * normalized_page_size + len(displayed_summaries),
@@ -3027,14 +3093,14 @@ def _render_approval_content(
         f"<tr><td>{_render_stamp('Venue')}</td>"
         f'<td><a href="/approvals/venues/{escape(venue.id)}">{escape(venue.name)}</a></td>'
         f"<td>{_render_status_stamp(venue.status)}</td>"
-        f"<td>{venue_candidate_counts.get(venue.id, 0)} {'suggestion' if venue_candidate_counts.get(venue.id, 0) == 1 else 'suggestions'}</td></tr>"
+        f"<td>{_plural(venue_candidate_counts.get(venue.id, 0), 'suggestion')}</td></tr>"
         for venue in venues
     )
     artist_rows = "".join(
         f"<tr><td>{_render_stamp('Artist')}</td>"
         f'<td><a href="/approvals/artists/{escape(artist.id)}">{escape(artist.name)}</a></td>'
         f"<td>{_render_status_stamp(artist.status)}</td>"
-        f"<td>{artist_candidate_counts.get(artist.id, 0)} {'suggestion' if artist_candidate_counts.get(artist.id, 0) == 1 else 'suggestions'}</td></tr>"
+        f"<td>{_plural(artist_candidate_counts.get(artist.id, 0), 'suggestion')}</td></tr>"
         for artist in artists
     )
     rows = (

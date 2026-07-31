@@ -340,6 +340,19 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
 .events-card .event-table tbody tr td::before { content: none; display: none; }
 
 /* --- event table (§7.2) --- */
+/* The date stamp: weekday over DD Mon in the display face — the one place
+   display type appears inside data (§4.3). */
+.date-stamp { display: inline-flex; flex-direction: column;
+  font-family: var(--font-display); font-weight: 700; line-height: 1.15; }
+.date-stamp__weekday { font-size: var(--text-xs); letter-spacing: .08em;
+  text-transform: uppercase; color: var(--color-text-muted); }
+.date-stamp__date { font-size: var(--text-base); }
+/* inline-flex swallows the ancestor <a> underline, so the link cue (§3.4)
+   is restated on the date figures. */
+.date-link .date-stamp__date { text-decoration: underline;
+  text-decoration-color: var(--color-accent); text-decoration-thickness: 2px;
+  text-underline-offset: 0.15em; }
+.date-stamp--tba { color: var(--color-text-muted); }
 .event-table { width: 100%; border-collapse: collapse; font-size: var(--text-base); }
 .event-table th, .event-table td { line-height: 1.35; }
 .event-table thead { display: table-header-group; position: sticky; top: 0; z-index: 1; }

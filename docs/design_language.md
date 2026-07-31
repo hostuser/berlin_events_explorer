@@ -1,6 +1,6 @@
 # Design Language — Berlin Events Explorer
 
-Status: **proposed** · Scope: the Litestar web UI (`src/berlin_events_explorer/webapp.py`)
+Status: **adopted** (implemented 2026-07-31, phases 1–5 of §12) · Scope: the Litestar web UI (`src/berlin_events_explorer/webapp.py`)
 · Audience: anyone (human or agent) implementing or reviewing UI changes.
 
 This document is the single source of truth for how the Berlin Events Explorer UI
