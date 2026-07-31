@@ -14,3 +14,4 @@ requirements.txt
 events.sqlite
 events.sqlite.*
 .hermes/
+events.sqlite*
