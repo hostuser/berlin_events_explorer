@@ -366,23 +366,26 @@ def create_app(
         recent_days: int = 7,
         search: str = "",
     ) -> Response:
-        all_events = list(store.list_events())
-        normalized_days = _normalize_recent_days(recent_days)
-        effective_page_size = page_size or _get_default_table_size(store)
-        events = _events_for_tab(all_events, tab=tab, recent_days=normalized_days)
-        filtered_events = _filter_events(events, search)
-        paged_events, current_page, normalized_page_size, total_pages = (
-            _paginate_events(filtered_events, page=page, page_size=effective_page_size)
-        )
-        venue_ids_by_event = store.get_venue_ids_for_events(
-            [event.id for event in paged_events]
-        )
-        artist_ids_by_event_performer = _verified_artist_ids_by_event_performer(
-            store, [event.id for event in paged_events]
+        (
+            paged_events,
+            filtered_count,
+            current_page,
+            normalized_page_size,
+            total_pages,
+            normalized_days,
+            venue_ids_by_event,
+            artist_ids_by_event_performer,
+        ) = _event_listing_data(
+            store,
+            page=page,
+            page_size=page_size,
+            tab=tab,
+            recent_days=recent_days,
+            search=search,
         )
         html = render_events_page(
             paged_events,
-            total_count=len(filtered_events),
+            total_count=filtered_count,
             page=current_page,
             page_size=normalized_page_size,
             total_pages=total_pages,
@@ -393,6 +396,60 @@ def create_app(
             artist_ids_by_event_performer=artist_ids_by_event_performer,
         )
         return Response(content=html, media_type="text/html")
+
+    @get("/events/search", sync_to_thread=True)
+    def search_events(
+        page_size: int = 0,
+        tab: str = "recent",
+        recent_days: int = 7,
+        search: str = "",
+    ) -> Stream:
+        """Return a Datastar patch for the filtered event table."""
+
+        (
+            paged_events,
+            filtered_count,
+            current_page,
+            normalized_page_size,
+            total_pages,
+            normalized_days,
+            venue_ids_by_event,
+            artist_ids_by_event_performer,
+        ) = _event_listing_data(
+            store,
+            page=1,
+            page_size=page_size,
+            tab=tab,
+            recent_days=recent_days,
+            search=search,
+        )
+        events_panel = _render_events_panel(
+            paged_events,
+            total_count=filtered_count,
+            page=current_page,
+            page_size=normalized_page_size,
+            total_pages=total_pages,
+            tab=tab,
+            recent_days=normalized_days,
+            search=search.strip(),
+            venue_ids_by_event=venue_ids_by_event,
+            artist_ids_by_event_performer=artist_ids_by_event_performer,
+        )
+        return Stream(
+            content=(
+                _sse_event("datastar-patch-elements", f"elements {events_panel}")
+                + _sse_event(
+                    "datastar-patch-signals",
+                    _signals_payload(
+                        event_count=filtered_count,
+                        is_syncing=False,
+                        sync_error=None,
+                    ),
+                )
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @get("/dates/{event_date:str}", sync_to_thread=True)
     def date_events(event_date: str) -> Response:
@@ -868,6 +925,7 @@ def create_app(
     return Litestar(
         route_handlers=[
             index,
+            search_events,
             date_events,
             venues,
             venue_detail,
@@ -948,6 +1006,50 @@ def _get_default_table_size(store: EventStore) -> int:
     ):
         return configured
     return DEFAULT_TABLE_SIZE
+
+
+def _event_listing_data(
+    store: EventStore,
+    *,
+    page: int,
+    page_size: int,
+    tab: str,
+    recent_days: int,
+    search: str,
+) -> tuple[
+    list[Event],
+    int,
+    int,
+    int,
+    int,
+    int,
+    dict[str, str],
+    dict[tuple[str, int], str],
+]:
+    """Build the filtered, paginated event listing and its metadata."""
+
+    normalized_days = _normalize_recent_days(recent_days)
+    effective_page_size = page_size or _get_default_table_size(store)
+    events = _events_for_tab(
+        list(store.list_events()), tab=tab, recent_days=normalized_days
+    )
+    filtered_events = _filter_events(events, search)
+    paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
+        filtered_events,
+        page=page,
+        page_size=effective_page_size,
+    )
+    event_ids = [event.id for event in paged_events]
+    return (
+        paged_events,
+        len(filtered_events),
+        current_page,
+        normalized_page_size,
+        total_pages,
+        normalized_days,
+        store.get_venue_ids_for_events(event_ids),
+        _verified_artist_ids_by_event_performer(store, event_ids),
+    )
 
 
 def _render_settings_page(
@@ -1712,7 +1814,7 @@ def render_events_page(
         right: 0.5rem;
         top: 50%;
         transform: translateY(-50%);
-        display: none;
+        display: flex;
         align-items: center;
         justify-content: center;
         width: 1.4rem;
@@ -1729,10 +1831,6 @@ def render_events_page(
 
       .filter-clear:hover {
         background: #cbd5e1;
-      }
-
-      .filter-clear.visible {
-        display: flex;
       }
 
       .result-count {
@@ -1769,6 +1867,20 @@ def render_events_page(
         venue_ids_by_event=venue_ids_by_event,
         artist_ids_by_event_performer=artist_ids_by_event_performer,
     )
+    signals = escape(
+        json.dumps(
+            {
+                "eventCount": total_count,
+                "eventSearch": search,
+                "eventTab": tab,
+                "eventRecentDays": recent_days,
+                "eventPageSize": page_size,
+                "isSyncing": False,
+                "syncError": None,
+            }
+        ),
+        quote=True,
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1782,7 +1894,7 @@ def render_events_page(
     </style>
   </head>
   <body>
-    <main class="events-app" data-signals='{{eventCount: {total_count}, isSyncing: false, syncError: null}}'>
+    <main class="events-app" data-signals='{signals}'>
       <header class="events-header">
         <p class="page-kicker">Berlin Events</p>
         <div class="toolbar">
@@ -1793,7 +1905,7 @@ def render_events_page(
               class="sync-button"
               data-attr="{{'disabled': $isSyncing}}"
               data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
-              data-on:click="@post('sync?tab={tab}&recent_days={recent_days}&search={escape(search, quote=True)}')">
+              data-on:click="@post('sync?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">
               Sync now
             </button>
             <a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>
@@ -1804,44 +1916,25 @@ def render_events_page(
       <section id="sync-progress" class="sync-progress" aria-live="polite"></section>
       {_render_tabs(tab=tab, recent_days=recent_days, search=search)}
       <section class="filter-bar" aria-labelledby="event-filter-label">
-        <form class="filter-label" id="event-filter-label" method="get" action="/">
+        <div class="filter-label" id="event-filter-label">
           <label for="event-filter">Filter events</label>
           <div class="filter-wrapper">
             <input class="filter-input" id="event-filter" type="search" name="search"
+              data-bind="eventSearch"
+              data-on:input__debounce_350ms="@get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
               value="{escape(search, quote=True)}"
               placeholder="Search by title, venue, or performers" autocomplete="off" />
             <button class="filter-clear" id="event-filter-clear" type="button"
-              aria-label="Clear filter">&times;</button>
+              aria-label="Clear filter"
+              data-attr="{{'hidden': $eventSearch.length === 0}}"
+              data-on:click="$eventSearch = ''; @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
           </div>
-          <input type="hidden" name="tab" value="{escape(tab, quote=True)}" />
-          <input type="hidden" name="recent_days" value="{recent_days}" />
-        </form>
-        <p class="result-count" id="event-result-count" aria-live="polite">{total_count} events</p>
+        </div>
+        <p class="result-count" id="event-result-count" aria-live="polite"
+          data-text="$eventCount + ' events'">{total_count} events</p>
       </section>
       {events_html}
     </main>
-    <script>
-      (() => {{
-        const input = document.querySelector("#event-filter");
-        const clear = document.querySelector("#event-filter-clear");
-        const form = input ? input.closest("form") : null;
-        if (!input || !clear || !form) return;
-        const updateClear = () => {{
-          clear.classList.toggle("visible", input.value.length > 0);
-        }};
-        clear.addEventListener("click", () => {{
-          input.value = "";
-          form.requestSubmit();
-        }});
-        let timer;
-        input.addEventListener("input", () => {{
-          updateClear();
-          clearTimeout(timer);
-          timer = setTimeout(() => form.requestSubmit(), 350);
-        }});
-        updateClear();
-      }})();
-    </script>
   </body>
 </html>
 """

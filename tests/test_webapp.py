@@ -118,7 +118,12 @@ def test_render_events_page_renders_table_rows() -> None:
     assert 'href="/artists/dj-example"' in page
     assert "techno, house" in page
     assert "Berlin Events Explorer (" in page
-    assert "data-on:click=\"@post('sync?tab=upcoming&recent_days=7&search=')\"" in page
+    assert (
+        "data-on:click=\"@post('sync?page_size=' + $eventPageSize + '&amp;tab='" in page
+    )
+    assert 'data-bind="eventSearch"' in page
+    assert "data-on:input__debounce_350ms=\"@get('/events/search?" in page
+    assert "requestSubmit" not in page
     assert "data-signals" in page
     assert "Page 1 of 2" in page
     assert "?page=2&page_size=25" in page
@@ -362,12 +367,42 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
 
     assert response.status_code == 200
     assert (
-        "data-on:click=\"@post('sync?tab=recent&recent_days=7&search=')\""
+        "data-on:click=\"@post('sync?page_size=' + $eventPageSize + '&amp;tab='"
         in response.text
     )
+    assert 'data-bind="eventSearch"' in response.text
+    assert "data-on:input__debounce_350ms=\"@get('/events/search?" in response.text
+    assert "requestSubmit" not in response.text
     assert "Sync now" in response.text
     assert 'href="/approvals"' in response.text
     assert "Awaiting approval" in response.text
+
+
+def test_webapp_search_endpoint_returns_datastar_event_panel_patch(tmp_path) -> None:
+    """Live event search patches the table without replacing the search controls."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert(_seed_event().model_copy(update={"title": "House Signal"}))
+    store.upsert(
+        _seed_event().model_copy(update={"id": "evt-jazz", "title": "Jazz Signal"})
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/events/search?tab=upcoming&search=house")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: datastar-patch-elements" in response.text
+    assert 'data: elements <section id="events-panel">' in response.text
+    assert "House Signal" in response.text
+    assert "Jazz Signal" not in response.text
+    assert (
+        "data: signals {eventCount: 1, isSyncing: false, syncError: null}"
+        in response.text
+    )
+    assert 'id="event-filter"' not in response.text
+    assert "<!doctype html>" not in response.text
 
 
 def _seed_pending_venue(store: EventStore) -> VenueCandidate:
