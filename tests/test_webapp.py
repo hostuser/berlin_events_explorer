@@ -1945,7 +1945,7 @@ def test_only_pure_handlers_run_on_the_event_loop(tmp_path) -> None:
     """Handlers doing database or subprocess work must run in the thread pool."""
 
     app = create_app(tmp_path / "events.sqlite", sync_interval=None)
-    pure_handlers = {"health", "login_page"}
+    pure_handlers = {"health", "login_page", "app_stylesheet"}
     offenders = sorted(
         {
             fn.__name__

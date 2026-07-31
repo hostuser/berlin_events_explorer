@@ -67,6 +67,7 @@ from berlin_events_explorer.models import (
     VenueStatus,
     event_search_text,
 )
+from berlin_events_explorer import theme
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore, VenueSummary
 from berlin_events_explorer.sync import SyncError, open_sync_cache
@@ -1262,6 +1263,20 @@ def create_app(
 
         return {"status": "ok"}
 
+    @get("/static/app.css", sync_to_thread=False)
+    def app_stylesheet() -> Response:
+        """Serve the consolidated stylesheet with far-future caching.
+
+        The href carries a content hash (theme.STYLESHEET_HREF), so the
+        response can be immutable: a changed stylesheet gets a new URL.
+        """
+
+        return Response(
+            content=theme.stylesheet(),
+            media_type="text/css",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
     if sync_interval is not None and sync_interval <= timedelta():
         raise ValueError("sync_interval must be positive or None")
 
@@ -1314,6 +1329,7 @@ def create_app(
             save_settings,
             clear_database,
             health,
+            app_stylesheet,
             login_page,
             do_login,
             logout,
