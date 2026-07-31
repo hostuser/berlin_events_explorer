@@ -604,9 +604,18 @@ def test_venues_page_lists_districts_event_counts_and_case_insensitive_filter(
             "venue": Venue(name="Lido"),
         }
     )
+    past_event = first_event.model_copy(
+        update={
+            "id": "evt-past",
+            "title": "Past Signal",
+            "start_date": date.today() - timedelta(days=1),
+            "venue": Venue(name="Example Club"),
+        }
+    )
     store.upsert(first_event)
     store.upsert(second_event)
     store.upsert(third_event)
+    store.upsert(past_event)
     store.upsert_venue(
         VenueRecord(
             id="example-club",
@@ -634,6 +643,13 @@ def test_venues_page_lists_districts_event_counts_and_case_insensitive_filter(
     store.link_event_venue(first_event.id, "example-club", source_name="Example Club")
     store.link_event_venue(second_event.id, "example-club", source_name="Example Club")
     store.link_event_venue(third_event.id, "lido", source_name="Lido")
+    store.link_event_venue(past_event.id, "example-club", source_name="Example Club")
+
+    summaries = {
+        summary.venue.id: summary.event_count
+        for summary in store.list_venue_summaries()
+    }
+    assert summaries == {"example-club": 2, "lido": 1}
 
     with TestClient(create_app(database)) as client:
         response = client.get("/venues")

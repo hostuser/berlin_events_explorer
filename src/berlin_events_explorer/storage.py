@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    case,
     Column,
     Connection,
     DateTime,
@@ -1024,11 +1025,23 @@ class EventStore:
         query = (
             select(
                 venues_table,
-                func.count(event_venues_table.c.event_id).label("event_count"),
+                func.count(
+                    case(
+                        (
+                            func.json_extract(events_table.c.event_json, "$.start_date")
+                            >= date.today().isoformat(),
+                            event_venues_table.c.event_id,
+                        ),
+                    )
+                ).label("event_count"),
             )
             .outerjoin(
                 event_venues_table,
                 event_venues_table.c.venue_id == venues_table.c.id,
+            )
+            .outerjoin(
+                events_table,
+                events_table.c.id == event_venues_table.c.event_id,
             )
             .where(venues_table.c.status != VenueStatus.NOT_A_VENUE.value)
             .group_by(venues_table.c.id)
