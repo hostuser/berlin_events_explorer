@@ -18,6 +18,7 @@ import logging
 import os
 import secrets
 import subprocess
+from functools import cache
 from queue import Queue
 from threading import Lock, Thread
 from collections.abc import Mapping
@@ -29,14 +30,16 @@ from typing import Annotated, AsyncIterator
 import math
 from urllib.parse import quote_plus, urlparse
 
+import anyio
 import httpx
 from litestar import Litestar, Request, get, post
 from litestar.config.csrf import CSRFConfig
 from litestar.connection import ASGIConnection
+from litestar.enums import RequestEncodingType
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers import BaseRouteHandler
 from litestar.middleware.session.server_side import ServerSideSessionConfig
-from litestar.params import FromPath, FromQuery, QueryParameter
+from litestar.params import Body, FromPath, FromQuery, QueryParameter
 from litestar.response import Redirect, Response, Stream
 from litestar.stores.memory import MemoryStore
 from litestar.utils.scope.state import ScopeState
@@ -251,6 +254,13 @@ def _get_app_version() -> str:
     if commit:
         return f"git:{commit}"
     return PACKAGE_VERSION
+
+
+@cache
+def _cached_app_version() -> str:
+    """Resolve the application version once; it cannot change while running."""
+
+    return _get_app_version()
 
 
 def _form_string(form: Mapping[str, object], key: str) -> str:
@@ -841,89 +851,104 @@ def create_app(
             destination += f"&entity_type={quote_plus(entity_type)}"
         return Redirect(destination, status_code=303)
 
-    @get(
-        "/approvals/venues/{venue_id:str}",
-        sync_to_thread=False,
-        guards=[_require_editor],
-    )
-    def venue_approval(
+    # Shared-path note: Litestar 2.24 mis-wraps a route when a handler with
+    # sync_to_thread=True shares its path with another handler, so handlers on
+    # shared paths stay async and push blocking work to the thread pool via
+    # anyio instead.
+    @get("/approvals/venues/{venue_id:str}", guards=[_require_editor])
+    async def venue_approval(
         request: Request,
         venue_id: FromPath[str],
         candidate_key: FromQuery[str | None] = None,
     ) -> Response:
         """Render a venue-specific approval form and its available suggestions."""
 
-        venue = store.get_venue(venue_id)
-        if venue is None:
-            return Response(
-                "<h1>Venue not found</h1>", media_type="text/html", status_code=404
-            )
-        candidates = store.list_venue_candidates(venue_id)
-        selected = _select_candidate(candidates, candidate_key)
-        return Response(
-            content=_render_venue_approval_form(
-                venue,
-                candidates,
-                selected,
-                store.list_events_for_venue(venue_id),
-                csrf_token=_csrf_token_from(request),
-            ),
-            media_type="text/html",
-        )
-
-    @post("/approvals/venues/{venue_id:str}", guards=[_require_editor])
-    async def approve_venue(
-        venue_id: FromPath[str], request: Request
-    ) -> Redirect | Response:
-        """Approve the venue using the values currently submitted by its form."""
-
-        form = await request.form()
-        current = store.get_venue(venue_id)
-        action = _form_string(form, "action")
-        provider = _form_string(form, "provider")
-        osm_type = _form_string(form, "osm_type")
-        osm_id = _form_string(form, "osm_id")
-        try:
-            if action == "approve":
-                _approve_edited_venue(
-                    store,
-                    venue_id=venue_id,
-                    form=form,
-                    provider=provider or None,
-                    osm_type=osm_type or None,
-                    osm_id=osm_id or None,
-                )
-            else:
-                raise ValueError("Unsupported approval action.")
-        except (ValueError, ValidationError) as exc:
+        def _handle() -> Response:
             venue = store.get_venue(venue_id)
             if venue is None:
                 return Response(
                     "<h1>Venue not found</h1>", media_type="text/html", status_code=404
                 )
             candidates = store.list_venue_candidates(venue_id)
-            selected = _select_candidate(
-                candidates,
-                _candidate_key_from_parts(provider, osm_type, osm_id),
-            )
+            selected = _select_candidate(candidates, candidate_key)
             return Response(
                 content=_render_venue_approval_form(
                     venue,
                     candidates,
                     selected,
                     store.list_events_for_venue(venue_id),
-                    error=str(exc),
                     csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
-                status_code=400,
             )
-        destination = (
-            f"/venues/{venue_id}"
-            if current is not None and current.status is VenueStatus.VERIFIED
-            else "/approvals"
-        )
-        return Redirect(destination, status_code=303)
+
+        return await anyio.to_thread.run_sync(_handle)
+
+    # Shared-path note: Litestar 2.24 mis-wraps a route when both of its
+    # handlers use sync_to_thread=True, so the POST siblings of threaded GET
+    # handlers stay async and push their blocking work to the thread pool.
+    @post("/approvals/venues/{venue_id:str}", guards=[_require_editor])
+    async def approve_venue(
+        request: Request,
+        venue_id: FromPath[str],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Approve the venue using the values currently submitted by its form."""
+
+        def _handle() -> Redirect | Response:
+            form = data
+            current = store.get_venue(venue_id)
+            action = _form_string(form, "action")
+            provider = _form_string(form, "provider")
+            osm_type = _form_string(form, "osm_type")
+            osm_id = _form_string(form, "osm_id")
+            try:
+                if action == "approve":
+                    _approve_edited_venue(
+                        store,
+                        venue_id=venue_id,
+                        form=form,
+                        provider=provider or None,
+                        osm_type=osm_type or None,
+                        osm_id=osm_id or None,
+                    )
+                else:
+                    raise ValueError("Unsupported approval action.")
+            except (ValueError, ValidationError) as exc:
+                venue = store.get_venue(venue_id)
+                if venue is None:
+                    return Response(
+                        "<h1>Venue not found</h1>",
+                        media_type="text/html",
+                        status_code=404,
+                    )
+                candidates = store.list_venue_candidates(venue_id)
+                selected = _select_candidate(
+                    candidates,
+                    _candidate_key_from_parts(provider, osm_type, osm_id),
+                )
+                return Response(
+                    content=_render_venue_approval_form(
+                        venue,
+                        candidates,
+                        selected,
+                        store.list_events_for_venue(venue_id),
+                        error=str(exc),
+                        csrf_token=_csrf_token_from(request),
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            destination = (
+                f"/venues/{venue_id}"
+                if current is not None and current.status is VenueStatus.VERIFIED
+                else "/approvals"
+            )
+            return Redirect(destination, status_code=303)
+
+        return await anyio.to_thread.run_sync(_handle)
 
     @post(
         "/approvals/venues/{venue_id:str}/discover",
@@ -963,67 +988,79 @@ def create_app(
             )
         return Redirect(f"/approvals/venues/{venue_id}", status_code=303)
 
-    @get(
-        "/approvals/artists/{artist_id:str}",
-        sync_to_thread=False,
-        guards=[_require_editor],
-    )
-    def artist_approval(request: Request, artist_id: FromPath[str]) -> Response:
+    @get("/approvals/artists/{artist_id:str}", guards=[_require_editor])
+    async def artist_approval(request: Request, artist_id: FromPath[str]) -> Response:
         """Render a review form for one canonical artist's candidate identities."""
 
-        artist = store.get_artist(artist_id)
-        if artist is None:
-            return Response(
-                "<h1>Artist not found</h1>", media_type="text/html", status_code=404
-            )
-        return Response(
-            content=_render_artist_approval_form(
-                artist,
-                store.list_artist_candidates(artist_id),
-                homepage=store.get_artist_official_homepage(artist_id),
-                csrf_token=_csrf_token_from(request),
-            ),
-            media_type="text/html",
-        )
-
-    @post("/approvals/artists/{artist_id:str}", guards=[_require_editor])
-    async def approve_artist(
-        artist_id: FromPath[str], request: Request
-    ) -> Redirect | Response:
-        """Apply reviewed identity data and manually edited artist fields."""
-
-        form = await request.form()
-        candidate_id = _form_string(form, "candidate")
-        current = store.get_artist(artist_id)
-        try:
-            if candidate_id:
-                store.select_artist_candidate(artist_id, "musicbrainz", candidate_id)
-            elif current is None or current.status is not ArtistStatus.VERIFIED:
-                raise ValueError("Select an artist candidate before approving.")
-            _save_edited_artist(store, artist_id=artist_id, form=form)
-        except (ValueError, ValidationError) as exc:
+        def _handle() -> Response:
             artist = store.get_artist(artist_id)
             if artist is None:
                 return Response(
-                    "<h1>Artist not found</h1>", media_type="text/html", status_code=404
+                    "<h1>Artist not found</h1>",
+                    media_type="text/html",
+                    status_code=404,
                 )
             return Response(
                 content=_render_artist_approval_form(
                     artist,
                     store.list_artist_candidates(artist_id),
                     homepage=store.get_artist_official_homepage(artist_id),
-                    error=str(exc),
                     csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
-                status_code=400,
             )
-        destination = (
-            f"/artists/{artist_id}"
-            if current is not None and current.status is ArtistStatus.VERIFIED
-            else "/approvals?entity_type=artists"
-        )
-        return Redirect(destination, status_code=303)
+
+        return await anyio.to_thread.run_sync(_handle)
+
+    @post("/approvals/artists/{artist_id:str}", guards=[_require_editor])
+    async def approve_artist(
+        request: Request,
+        artist_id: FromPath[str],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Apply reviewed identity data and manually edited artist fields."""
+
+        def _handle() -> Redirect | Response:
+            form = data
+            candidate_id = _form_string(form, "candidate")
+            current = store.get_artist(artist_id)
+            try:
+                if candidate_id:
+                    store.select_artist_candidate(
+                        artist_id, "musicbrainz", candidate_id
+                    )
+                elif current is None or current.status is not ArtistStatus.VERIFIED:
+                    raise ValueError("Select an artist candidate before approving.")
+                _save_edited_artist(store, artist_id=artist_id, form=form)
+            except (ValueError, ValidationError) as exc:
+                artist = store.get_artist(artist_id)
+                if artist is None:
+                    return Response(
+                        "<h1>Artist not found</h1>",
+                        media_type="text/html",
+                        status_code=404,
+                    )
+                return Response(
+                    content=_render_artist_approval_form(
+                        artist,
+                        store.list_artist_candidates(artist_id),
+                        homepage=store.get_artist_official_homepage(artist_id),
+                        error=str(exc),
+                        csrf_token=_csrf_token_from(request),
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            destination = (
+                f"/artists/{artist_id}"
+                if current is not None and current.status is ArtistStatus.VERIFIED
+                else "/approvals?entity_type=artists"
+            )
+            return Redirect(destination, status_code=303)
+
+        return await anyio.to_thread.run_sync(_handle)
 
     @post(
         "/approvals/artists/{artist_id:str}/discover",
@@ -1094,77 +1131,15 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
-    @get("/settings", sync_to_thread=False, guards=[_require_editor])
-    def settings(
+    @get("/settings", guards=[_require_editor])
+    async def settings(
         request: Request,
         saved: FromQuery[str | None] = None,
         cleared: FromQuery[str | None] = None,
     ) -> Response:
         """Render persisted application configuration and development tools."""
 
-        return Response(
-            content=_render_settings_page(
-                csrf_token=_csrf_token_from(request),
-                threshold=_get_auto_approve_threshold(store, auto_approve_threshold),
-                musicbrainz_request_interval=_get_musicbrainz_request_interval(store),
-                musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
-                musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
-                    store
-                ),
-                default_table_size=_get_default_table_size(store),
-                environment=environment,
-                version=_get_app_version(),
-                saved=saved == "1",
-                cleared=cleared == "1",
-            ),
-            media_type="text/html",
-        )
-
-    @post("/settings", guards=[_require_editor])
-    async def save_settings(request: Request) -> Redirect | Response:
-        """Validate and persist settings used by subsequent synchronization passes."""
-
-        form = await request.form()
-        raw_threshold = _form_string(form, "auto_approve_threshold")
-        raw_interval = _form_string(form, "musicbrainz_request_interval_seconds")
-        raw_fetch_limit = _form_string(form, "musicbrainz_fetch_limit")
-        raw_metadata_fetch_limit = _form_string(
-            form, "musicbrainz_metadata_fetch_limit"
-        )
-        raw_table_size = _form_string(form, "default_table_size")
-        try:
-            threshold = float(raw_threshold)
-            interval = (
-                float(raw_interval)
-                if raw_interval
-                else _get_musicbrainz_request_interval(store)
-            )
-            fetch_limit = (
-                int(raw_fetch_limit)
-                if raw_fetch_limit
-                else _get_musicbrainz_fetch_limit(store)
-            )
-            metadata_fetch_limit = (
-                int(raw_metadata_fetch_limit)
-                if raw_metadata_fetch_limit
-                else _get_musicbrainz_metadata_fetch_limit(store)
-            )
-            table_size = (
-                int(raw_table_size)
-                if raw_table_size
-                else _get_default_table_size(store)
-            )
-            if not math.isfinite(threshold) or not 0 <= threshold <= 1:
-                raise ValueError
-            if not math.isfinite(interval) or not 1.0 <= interval <= 300:
-                raise ValueError
-            if not 1 <= fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
-                raise ValueError
-            if not 1 <= metadata_fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
-                raise ValueError
-            if not 1 <= table_size <= MAX_PAGE_SIZE:
-                raise ValueError
-        except ValueError:
+        def _handle() -> Response:
             return Response(
                 content=_render_settings_page(
                     csrf_token=_csrf_token_from(request),
@@ -1175,22 +1150,99 @@ def create_app(
                         store
                     ),
                     musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
-                    musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
-                        store
+                    musicbrainz_metadata_fetch_limit=(
+                        _get_musicbrainz_metadata_fetch_limit(store)
                     ),
                     default_table_size=_get_default_table_size(store),
                     environment=environment,
-                    error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000; table size must be 1–200.",
+                    version=_cached_app_version(),
+                    saved=saved == "1",
+                    cleared=cleared == "1",
                 ),
                 media_type="text/html",
-                status_code=400,
             )
-        store.set_setting("auto_approve_threshold", threshold)
-        store.set_setting("musicbrainz_request_interval_seconds", interval)
-        store.set_setting("musicbrainz_fetch_limit", fetch_limit)
-        store.set_setting("musicbrainz_metadata_fetch_limit", metadata_fetch_limit)
-        store.set_setting("default_table_size", table_size)
-        return Redirect("/settings?saved=1", status_code=303)
+
+        return await anyio.to_thread.run_sync(_handle)
+
+    @post("/settings", guards=[_require_editor])
+    async def save_settings(
+        request: Request,
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Validate and persist settings used by subsequent synchronization passes."""
+
+        def _handle() -> Redirect | Response:
+            form = data
+            raw_threshold = _form_string(form, "auto_approve_threshold")
+            raw_interval = _form_string(form, "musicbrainz_request_interval_seconds")
+            raw_fetch_limit = _form_string(form, "musicbrainz_fetch_limit")
+            raw_metadata_fetch_limit = _form_string(
+                form, "musicbrainz_metadata_fetch_limit"
+            )
+            raw_table_size = _form_string(form, "default_table_size")
+            try:
+                threshold = float(raw_threshold)
+                interval = (
+                    float(raw_interval)
+                    if raw_interval
+                    else _get_musicbrainz_request_interval(store)
+                )
+                fetch_limit = (
+                    int(raw_fetch_limit)
+                    if raw_fetch_limit
+                    else _get_musicbrainz_fetch_limit(store)
+                )
+                metadata_fetch_limit = (
+                    int(raw_metadata_fetch_limit)
+                    if raw_metadata_fetch_limit
+                    else _get_musicbrainz_metadata_fetch_limit(store)
+                )
+                table_size = (
+                    int(raw_table_size)
+                    if raw_table_size
+                    else _get_default_table_size(store)
+                )
+                if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+                    raise ValueError
+                if not math.isfinite(interval) or not 1.0 <= interval <= 300:
+                    raise ValueError
+                if not 1 <= fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+                    raise ValueError
+                if not 1 <= metadata_fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+                    raise ValueError
+                if not 1 <= table_size <= MAX_PAGE_SIZE:
+                    raise ValueError
+            except ValueError:
+                return Response(
+                    content=_render_settings_page(
+                        csrf_token=_csrf_token_from(request),
+                        threshold=_get_auto_approve_threshold(
+                            store, auto_approve_threshold
+                        ),
+                        musicbrainz_request_interval=_get_musicbrainz_request_interval(
+                            store
+                        ),
+                        musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
+                        musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
+                            store
+                        ),
+                        default_table_size=_get_default_table_size(store),
+                        environment=environment,
+                        error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000; table size must be 1–200.",
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            store.set_setting("auto_approve_threshold", threshold)
+            store.set_setting("musicbrainz_request_interval_seconds", interval)
+            store.set_setting("musicbrainz_fetch_limit", fetch_limit)
+            store.set_setting("musicbrainz_metadata_fetch_limit", metadata_fetch_limit)
+            store.set_setting("default_table_size", table_size)
+            return Redirect("/settings?saved=1", status_code=303)
+
+        return await anyio.to_thread.run_sync(_handle)
 
     @post("/settings/clear-database", sync_to_thread=True, guards=[_require_editor])
     def clear_database() -> Redirect | Response:
@@ -1392,7 +1444,7 @@ def _render_settings_page(
 ) -> str:
     """Render operational settings with a development-only destructive action."""
 
-    display_version = version or _get_app_version()
+    display_version = version or _cached_app_version()
     notices = ""
     if saved:
         notices += '<p class="notice success">Settings saved.</p>'

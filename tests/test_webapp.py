@@ -1,7 +1,9 @@
 """Tests for the Litestar web UI."""
 
 import asyncio
+import inspect
 import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -1930,3 +1932,114 @@ def test_sync_endpoint_reports_sync_already_running(tmp_path, monkeypatch) -> No
 
     assert response.status_code == 200
     assert "already in progress" in response.text
+
+
+def test_only_pure_handlers_run_on_the_event_loop(tmp_path) -> None:
+    """Handlers doing database or subprocess work must run in the thread pool."""
+
+    app = create_app(tmp_path / "events.sqlite", sync_interval=None)
+    pure_handlers = {"health", "login_page"}
+    offenders = sorted(
+        {
+            fn.__name__
+            for route in app.routes
+            for handler in getattr(route, "route_handlers", [])
+            if (fn := getattr(handler.fn, "func", handler.fn)).__module__
+            == "berlin_events_explorer.webapp"
+            and not inspect.iscoroutinefunction(fn)
+            and getattr(handler, "sync_to_thread", None) is not True
+            and fn.__name__ not in pure_handlers
+        }
+    )
+    assert offenders == []
+
+
+def test_slow_settings_render_does_not_block_other_requests(
+    tmp_path, monkeypatch
+) -> None:
+    """A stalled worker-thread handler must not stop the event loop serving /health."""
+
+    def slow_render(**_kwargs: object) -> str:
+        time.sleep(1.0)
+        return "settings"
+
+    monkeypatch.setattr(webapp, "_render_settings_page", slow_render)
+    app = create_app(tmp_path / "events.sqlite", sync_interval=None)
+    with TestClient(app) as client:
+        _login(client)
+        started_slow = threading.Event()
+
+        def fetch_settings() -> None:
+            started_slow.set()
+            client.get("/settings")
+
+        worker = threading.Thread(target=fetch_settings, daemon=True)
+        worker.start()
+        assert started_slow.wait(timeout=5)
+        time.sleep(0.2)
+        started = time.perf_counter()
+        assert client.get("/health").status_code == 200
+        elapsed = time.perf_counter() - started
+        worker.join(timeout=5)
+    assert elapsed < 0.6, f"/health took {elapsed:.2f}s while /settings was busy"
+
+
+def test_slow_venue_approval_post_does_not_block_other_requests(
+    tmp_path, monkeypatch
+) -> None:
+    """Form-handling approval endpoints must not do blocking work on the loop."""
+
+    def slow_approve(*_args: object, **_kwargs: object) -> None:
+        time.sleep(1.0)
+        raise ValueError("slow approval")
+
+    monkeypatch.setattr(webapp, "_approve_edited_venue", slow_approve)
+    database = tmp_path / "events.sqlite"
+    EventStore(database).upsert_venue(
+        VenueRecord(id="berghain", name="Berghain", normalized_name="berghain")
+    )
+    app = create_app(database, sync_interval=None)
+    with TestClient(app) as client:
+        _login(client)
+        started_slow = threading.Event()
+
+        def post_approval() -> None:
+            started_slow.set()
+            _post(
+                client,
+                "/approvals/venues/berghain",
+                data={"action": "approve", "name": "Berghain"},
+            )
+
+        worker = threading.Thread(target=post_approval, daemon=True)
+        worker.start()
+        assert started_slow.wait(timeout=5)
+        time.sleep(0.2)
+        started = time.perf_counter()
+        assert client.get("/health").status_code == 200
+        elapsed = time.perf_counter() - started
+        worker.join(timeout=5)
+    assert elapsed < 0.6, f"/health took {elapsed:.2f}s while approval was busy"
+
+
+def test_settings_page_uses_cached_app_version(tmp_path, monkeypatch) -> None:
+    """The settings page must not shell out to git on every request."""
+
+    calls = {"count": 0}
+
+    def counting_git(*_args: str) -> str:
+        calls["count"] += 1
+        return "0.0.7"
+
+    monkeypatch.setattr(webapp, "_run_git", counting_git)
+    webapp._cached_app_version.cache_clear()
+    try:
+        with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+            _login(client)
+            assert client.get("/settings").status_code == 200
+            first_calls = calls["count"]
+            assert client.get("/settings").status_code == 200
+        assert first_calls > 0
+        assert calls["count"] == first_calls
+    finally:
+        webapp._cached_app_version.cache_clear()
