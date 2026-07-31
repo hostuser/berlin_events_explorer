@@ -4,8 +4,10 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from litestar import Response
 from litestar.testing import TestClient
 
+from berlin_events_explorer import webapp
 from berlin_events_explorer.models import (
     ArtistCandidate,
     ArtistMetadata,
@@ -152,7 +154,7 @@ def test_render_events_page_renders_table_rows() -> None:
         "data-on:click=\"@post('sync?page_size=' + $eventPageSize + '&amp;tab='" in page
     )
     assert 'data-bind="eventSearch"' in page
-    assert 'data-on:input__debounce_350ms="history.replaceState(' in page
+    assert 'data-on:input__debounce_150ms="history.replaceState(' in page
     assert "@get('/events/search?" in page
     assert "requestSubmit" not in page
     assert "data-signals" in page
@@ -161,6 +163,29 @@ def test_render_events_page_renders_table_rows() -> None:
     assert "Recently added" in page
     assert "Upcoming" in page
     assert '<a class="date-link" href="/dates/2026-07-01">2026-07-01</a>' in page
+
+
+def test_event_search_emits_its_sse_response_as_one_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Search must not make the streaming layer iterate an SSE body character by character."""
+
+    captured: dict[str, object] = {}
+
+    def capture_stream(*, content: object, **_kwargs: object) -> Response:
+        captured["content"] = content
+        return Response(content="ok", media_type="text/event-stream")
+
+    app = create_app(tmp_path / "events.sqlite")
+    monkeypatch.setattr(webapp, "Stream", capture_stream)
+
+    with TestClient(app) as client:
+        response = client.get("/events/search?tab=upcoming&search=house&page_size=20")
+
+    assert response.text == "ok"
+    assert isinstance(captured["content"], tuple)
+    assert len(captured["content"]) == 1
+    assert isinstance(captured["content"][0], str)
 
 
 def test_events_on_date_includes_events_within_a_date_range() -> None:
@@ -267,6 +292,41 @@ def test_recent_events_panel_includes_date_added_column() -> None:
 
     assert "<th>Date added</th>" in html
     assert 'data-label="Date added">2026-07-12</td>' in html
+
+
+def test_event_panel_uses_stable_scroll_viewport_and_footer() -> None:
+    """Event rows scroll within a stable viewport and totals share the footer."""
+
+    html = _render_events_panel(
+        [_seed_event()],
+        total_count=1,
+        page=1,
+        page_size=20,
+        total_pages=1,
+        tab="recent",
+    )
+
+    assert 'class="table-scroll"' in html
+    assert "--table-view-height:57.40rem" in html
+    assert '<footer class="table-footer">' in html
+    assert html.index("Showing 1 to 1 of 1 events") > html.index("</table>")
+
+
+def test_recent_filter_control_is_in_the_shared_filter_bar() -> None:
+    """The recent timeframe control sits beside, rather than above, event search."""
+
+    html = render_events_page(
+        [_seed_event()],
+        total_count=1,
+        page=1,
+        page_size=20,
+        total_pages=1,
+        tab="recent",
+    )
+
+    assert '<form class="filter-side recent-settings"' in html
+    assert html.index('class="filter-bar"') < html.index("Added within")
+    assert 'id="event-result-count"' not in html
 
 
 def test_paginate_events_clamps_bad_inputs() -> None:
@@ -404,8 +464,10 @@ def test_top_level_views_share_application_shell(tmp_path, path: str) -> None:
 
 
 @pytest.mark.parametrize("path", ["/?tab=upcoming", "/?tab=venues", "/?tab=approvals"])
-def test_datastar_tab_fragments_patch_only_tab_content(tmp_path, path: str) -> None:
-    """Tab actions return a fragment suitable for morphing without a full reload."""
+def test_datastar_tab_fragments_patch_without_blocking_view_transition(
+    tmp_path, path: str
+) -> None:
+    """Tab actions must leave subsequent tab clicks immediately clickable."""
 
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
         response = client.get(
@@ -417,7 +479,7 @@ def test_datastar_tab_fragments_patch_only_tab_content(tmp_path, path: str) -> N
     assert "event: datastar-patch-elements" in response.text
     assert "data: selector #tab-content" in response.text
     assert "data: mode outer" in response.text
-    assert "data: useViewTransition true" in response.text
+    assert "data: useViewTransition" not in response.text
     assert 'data: elements <section id="tab-content">' in response.text
     assert "<!doctype html>" not in response.text
     assert response.text.count('id="tab-content"') == 1
@@ -461,6 +523,31 @@ def test_application_navigation_writes_the_canonical_url(tmp_path) -> None:
     assert (
         "window.addEventListener('popstate', () => window.location.reload())"
         in response.text
+    )
+
+
+def test_event_search_stays_scoped_to_the_active_event_tab(tmp_path) -> None:
+    """Switching event tabs should clear the other tab's search term."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        recent_response = client.get("/?tab=recent&search=house&page_size=10")
+        upcoming_response = client.get("/?tab=upcoming&search=house&page_size=10")
+
+    assert (
+        "history.pushState(null, '', '/?tab=upcoming&recent_days=7&page_size=10')"
+        in recent_response.text
+    )
+    assert (
+        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10')"
+        in upcoming_response.text
+    )
+    assert (
+        "history.pushState(null, '', '/?tab=upcoming&recent_days=7&page_size=10&search=house')"
+        not in recent_response.text
+    )
+    assert (
+        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10&search=house')"
+        not in upcoming_response.text
     )
 
 
@@ -516,7 +603,7 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
         in response.text
     )
     assert 'data-bind="eventSearch"' in response.text
-    assert 'data-on:input__debounce_350ms="history.replaceState(' in response.text
+    assert 'data-on:input__debounce_150ms="history.replaceState(' in response.text
     assert "@get('/events/search?" in response.text
     assert "requestSubmit" not in response.text
     assert "Sync now" in response.text
@@ -1001,11 +1088,102 @@ def test_venues_page_lists_districts_event_counts_and_case_insensitive_filter(
     assert 'href="/venues/lido"' in response.text
     assert 'id="venue-filter"' in response.text
     assert "data-venue-row" in response.text
-    assert "toLocaleLowerCase()" in response.text
-    assert ".includes(query)" in response.text
+    assert 'name="search"' in response.text
 
     rendered_empty = _render_venues_page([])
     assert "No venues have been synced yet." in rendered_empty
+
+
+def test_venues_search_filters_before_pagination(tmp_path) -> None:
+    """Venue search totals and pages should describe the filtered catalog."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(4):
+        store.upsert_venue(
+            VenueRecord(
+                id=f"kantine-{index}",
+                name=f"Kantine {index}",
+                normalized_name=f"kantine {index}",
+            )
+        )
+    store.upsert_venue(
+        VenueRecord(
+            id="other",
+            name="Other Venue",
+            normalized_name="other venue",
+        )
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/?tab=venues&search=KANTINE&page_size=2")
+
+    assert response.status_code == 200
+    assert "Kantine 0" in response.text
+    assert "Kantine 1" in response.text
+    assert "Other Venue" not in response.text
+    assert "Showing 1 to 2 of 4 venues" in response.text
+    assert "Page 1 of 2" in response.text
+    assert (
+        'href="/?tab=venues&amp;page=2&amp;page_size=2&amp;search=KANTINE"'
+        in response.text
+    )
+
+
+def test_venues_search_resets_to_filtered_first_page(tmp_path) -> None:
+    """A search submitted from a later page starts at page one of its results."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(3):
+        store.upsert_venue(
+            VenueRecord(
+                id=f"venue-{index}",
+                name=f"Venue {index}",
+                normalized_name=f"venue {index}",
+            )
+        )
+    store.upsert_venue(
+        VenueRecord(
+            id="target",
+            name="Target Venue",
+            normalized_name="target venue",
+        )
+    )
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/?tab=venues&search=target&page=2&page_size=2")
+
+    assert response.status_code == 200
+    assert "Target Venue" in response.text
+    assert "Showing 1 to 1 of 1 venues" in response.text
+    assert "Page 1 of 1" in response.text
+
+
+def test_venues_filter_has_a_datastar_clear_button(tmp_path) -> None:
+    """The venue search can be cleared without manually deleting its text."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        response = client.get("/?tab=venues&search=kantine")
+
+    assert response.status_code == 200
+    assert 'id="venue-filter-clear"' in response.text
+    assert 'aria-label="Clear filter"' in response.text
+    assert "'hidden': $venueSearch.length === 0" in response.text
+    assert "$venueSearch = ''; history.replaceState" in response.text
+    assert "&amp;fragment=1')" in response.text
+
+
+def test_venues_tab_uses_the_shared_table_layout_without_catalog_intro() -> None:
+    """The venue tab starts at the shared filter height and keeps its footer stable."""
+
+    html = _render_venues_content(_seed_venue_summaries(1), page_size=20)
+
+    assert "Catalog" not in html
+    assert "Browse every venue in the catalog" not in html
+    assert "--table-view-height:57.40rem" in html
+    assert '<footer class="table-footer">' in html
+    assert html.index("Showing 1 to 1 of 1 venues") > html.index("</table>")
 
 
 def test_venue_detail_embeds_openstreetmap_when_coordinates_are_available(

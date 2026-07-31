@@ -74,6 +74,10 @@ DATASTAR_SCRIPT = (
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_TABLE_SIZE = 20
 MAX_PAGE_SIZE = 200
+# Reserve a stable visual slot for each configured row. Content that needs more
+# room remains available inside the scroll viewport instead of moving pagination.
+TABLE_ROW_SLOT_REM = 2.75
+TABLE_HEADER_SLOT_REM = 2.4
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
 logger = logging.getLogger(__name__)
 
@@ -377,6 +381,7 @@ def create_app(
                 summaries,
                 page=page,
                 page_size=normalized_page_size,
+                search=search,
             )
             if fragment:
                 return _render_tab_fragment(content, event_count=0)
@@ -385,6 +390,7 @@ def create_app(
                     summaries,
                     page=page,
                     page_size=normalized_page_size,
+                    search=search,
                 ),
                 media_type="text/html",
             )
@@ -523,15 +529,19 @@ def create_app(
         )
         return Stream(
             content=(
-                _sse_event("datastar-patch-elements", f"elements {events_panel}")
-                + _sse_event(
-                    "datastar-patch-signals",
-                    _signals_payload(
-                        event_count=filtered_count,
-                        is_syncing=False,
-                        sync_error=None,
-                    ),
-                )
+                (
+                    _sse_event(
+                        "datastar-patch-elements", f"elements {events_panel}"
+                    )
+                    + _sse_event(
+                        "datastar-patch-signals",
+                        _signals_payload(
+                            event_count=filtered_count,
+                            is_syncing=False,
+                            sync_error=None,
+                        ),
+                    )
+                ),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
@@ -1980,7 +1990,7 @@ def _legacy_render_events_page(
           <div class="filter-wrapper">
             <input class="filter-input" id="event-filter" type="search" name="search"
               data-bind="eventSearch"
-              data-on:input__debounce_350ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
+              data-on:input__debounce_150ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
               value="{escape(search, quote=True)}"
               placeholder="Search by title, venue, or performers" autocomplete="off" />
             <button class="filter-clear" id="event-filter-clear" type="button"
@@ -2812,18 +2822,29 @@ def _render_events_panel(
     )
 
     pagination = f"""
-      <p class="meta">Showing {start_index} to {end_index} of {total_count} events</p>
-      <div class="pagination" aria-label="Event pagination">
-        {previous_link}
-        <span class="pagination-page">Page {page} of {total_pages}</span>
-        {next_link}
-      </div>
+      <footer class="table-footer">
+        <p class="meta">Showing {start_index} to {end_index} of {total_count} events</p>
+        <div class="pagination" aria-label="Event pagination">
+          {previous_link}
+          <span class="pagination-page">Page {page} of {total_pages}</span>
+          {next_link}
+        </div>
+      </footer>
     """
 
     return f"""<section id=\"events-panel\">
-      {event_table}
+      <div class="table-scroll" aria-label="Event results" style="--table-view-height:{_table_view_height(page_size)}">
+        {event_table}
+      </div>
       {pagination}
     </section>"""
+
+
+def _table_view_height(page_size: int) -> str:
+    """Return a stable table viewport height for one configured page."""
+
+    height = TABLE_HEADER_SLOT_REM + page_size * TABLE_ROW_SLOT_REM
+    return f"{height:.2f}rem"
 
 
 def _sorted_events(events: list[Event]) -> list[Event]:
@@ -3111,7 +3132,17 @@ def _render_app_nav(
         else "upcoming"
     )
     encoded_search = quote_plus(search) if search else ""
-    search_param = f"&search={encoded_search}" if encoded_search else ""
+    recent_search_param = (
+        f"&search={encoded_search}" if encoded_search and active_tab == "recent" else ""
+    )
+    upcoming_search_param = (
+        f"&search={encoded_search}"
+        if encoded_search and active_tab == "upcoming"
+        else ""
+    )
+    venue_search_param = (
+        f"&search={encoded_search}" if encoded_search and active_tab == "venues" else ""
+    )
 
     def link(tab: str, label: str, href: str) -> str:
         selected = " active" if active_tab == tab else ""
@@ -3131,16 +3162,22 @@ def _render_app_nav(
         )
 
     recent_href = (
-        f"/?tab=recent&recent_days={recent_days}&page_size={page_size}{search_param}"
+        f"/?tab=recent&recent_days={recent_days}&page_size={page_size}"
+        f"{recent_search_param}"
     )
     upcoming_href = (
-        f"/?tab=upcoming&recent_days={recent_days}&page_size={page_size}{search_param}"
+        f"/?tab=upcoming&recent_days={recent_days}&page_size={page_size}"
+        f"{upcoming_search_param}"
     )
     return (
         '<nav class="tabs" aria-label="Application views">'
         + link("recent", "Recently added", recent_href)
         + link("upcoming", "Upcoming", upcoming_href)
-        + link("venues", "Venues", f"/?tab=venues&page_size={page_size}")
+        + link(
+            "venues",
+            "Venues",
+            f"/?tab=venues&page_size={page_size}{venue_search_param}",
+        )
         + link(
             "approvals", "Awaiting approval", f"/?tab=approvals&page_size={page_size}"
         )
@@ -3164,7 +3201,8 @@ def _render_app_page(
         "appView": active_tab,
         "eventTab": active_tab if active_tab in {"recent", "upcoming"} else "upcoming",
         "eventRecentDays": recent_days,
-        "eventSearch": search,
+        "eventSearch": search if active_tab in {"recent", "upcoming"} else "",
+        "venueSearch": search if active_tab == "venues" else "",
         "eventPageSize": DEFAULT_PAGE_SIZE,
         "eventCount": 0,
         "isSyncing": False,
@@ -3220,7 +3258,6 @@ def _render_tab_fragment(content: str, *, event_count: int) -> Stream:
         "datastar-patch-elements",
         "selector #tab-content",
         "mode outer",
-        "useViewTransition true",
         f"elements {_render_tab_content_element(content)}",
     ) + _sse_event(
         "datastar-patch-signals",
@@ -3266,8 +3303,10 @@ def _render_event_content(
             for days in (1, 7, 14, 30, 90)
         )
         recent_settings = (
-            '<form class="recent-settings" method="get">'
+            '<form class="filter-side recent-settings" method="get">'
             '<input type="hidden" name="tab" value="recent">'
+            f'<input type="hidden" name="page_size" value="{page_size}">'
+            f'<input type="hidden" name="search" value="{escape(search, quote=True)}">'
             '<label for="recent-days">Added within</label>'
             '<select id="recent-days" name="recent_days" onchange="this.form.submit()">'
             f"{options}</select></form>"
@@ -3285,22 +3324,20 @@ def _render_event_content(
         artist_ids_by_event_performer=artist_ids_by_event_performer,
     )
     encoded_search = escape(search, quote=True)
-    return f"""{recent_settings}
-      <section class="filter-bar" aria-labelledby="event-filter-label">
+    return f"""<section class="filter-bar" aria-labelledby="event-filter-label">
         <div class="filter-label" id="event-filter-label">
           <label for="event-filter">Filter events</label>
           <div class="filter-wrapper">
             <input class="filter-input" id="event-filter" type="search" name="search"
               data-bind="eventSearch"
-              data-on:input__debounce_350ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
+              data-on:input__debounce_150ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
               value="{encoded_search}" placeholder="Search by title, venue, or performers" autocomplete="off" />
             <button class="filter-clear" id="event-filter-clear" type="button" aria-label="Clear filter"
               data-attr="{{'hidden': $eventSearch.length === 0}}"
               data-on:click="$eventSearch = ''; history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
           </div>
         </div>
-        <p class="result-count" id="event-result-count" aria-live="polite"
-          data-text="$eventCount + ' events'">{total_count} events</p>
+        {recent_settings}
       </section>
       {events_html}"""
 
@@ -3309,12 +3346,13 @@ def _event_shell_styles() -> str:
     """Return styles specific to the events tab."""
 
     return """
-      .recent-settings { display:flex; align-items:center; gap:.5rem; margin:0 0 .75rem;
-        color:var(--muted); font-size:.9rem; }
+      .recent-settings { display:flex; align-items:flex-end; justify-content:flex-end; gap:.5rem;
+        margin:0; color:var(--muted); font-size:.9rem; }
+      .recent-settings label { white-space:nowrap; }
       .recent-settings select { border:1px solid var(--line); border-radius:.45rem; padding:.35rem .5rem;
         background:var(--surface); color:var(--text); }
-      .filter-bar { display:flex; align-items:end; justify-content:space-between; gap:1rem;
-        flex-wrap:wrap; margin:1.25rem 0 .8rem; }
+      .filter-bar { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:1rem;
+        margin:1.25rem 0 .8rem; }
       .filter-label { display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
         width:min(28rem,100%); }
       .filter-input { width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
@@ -3323,13 +3361,23 @@ def _event_shell_styles() -> str:
       .filter-clear { position:absolute; right:.5rem; top:50%; transform:translateY(-50%);
         display:flex; align-items:center; justify-content:center; width:1.4rem; height:1.4rem;
         border:0; border-radius:50%; background:#e2e8f0; color:#475569; cursor:pointer; padding:0; }
-      .result-count,.meta { color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }
+      .result-count,.meta { color:var(--muted); font-size:.9rem; margin:0; }
       #events-panel { margin-top:.5rem; background:var(--surface); border:1px solid var(--line);
         border-radius:var(--radius-lg); padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }
-      .pagination { display:flex; align-items:center; gap:.75rem; margin:.4rem 0 1rem; }
+      .table-scroll { height:var(--table-view-height); overflow:auto; }
+      .table-footer { display:flex; align-items:center; justify-content:space-between; gap:1rem;
+        min-height:2.5rem; margin-top:.55rem; }
+      .pagination { display:flex; align-items:center; gap:.75rem; margin:0; }
       .pagination-link { border-radius:999px; border:1px solid var(--line); color:var(--text);
         text-decoration:none; padding:.35rem .85rem; font-size:.9rem; background:var(--surface-soft); }
       .pagination-link.disabled { color:#94a3b8; pointer-events:none; background:#f8fafc; }
+      @media (max-width:720px) {
+        .filter-bar { grid-template-columns:minmax(0,1fr) auto; gap:.55rem; }
+        .filter-label { width:auto; min-width:0; }
+        .recent-settings { display:grid; justify-items:end; gap:.35rem; }
+        .table-footer { align-items:flex-start; flex-direction:column; }
+        .pagination { flex-wrap:wrap; }
+      }
     """ + _event_table_styles()
 
 
@@ -3384,25 +3432,26 @@ def _render_venues_content(
     page: int = 1,
     page_size: int = DEFAULT_TABLE_SIZE,
     table_size: int | None = None,
+    search: str = "",
 ) -> str:
     """Render one paginated venue catalog tab without the shared shell."""
 
     if table_size is not None:
         page_size = table_size
+    filtered_summaries = _filter_venue_summaries(summaries, search)
     displayed_summaries, current_page, normalized_page_size, total_pages = (
-        _paginate_venues(summaries, page=page, page_size=page_size)
+        _paginate_venues(filtered_summaries, page=page, page_size=page_size)
     )
-    total_venues = len(summaries)
+    total_venues = len(filtered_summaries)
     rows = ""
     for summary in displayed_summaries:
         venue = summary.venue
         district = venue.district or "Not listed"
-        search_text = escape(f"{venue.name} {district}".casefold(), quote=True)
         event_label = "event" if summary.event_count == 1 else "events"
         rows += (
             '<tr class="venue-row" data-venue-row '
             f'data-venue-href="/venues/{escape(venue.id, quote=True)}" '
-            f'data-venue-search="{search_text}" tabindex="0" role="link">'
+            'tabindex="0" role="link">'
             f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">{escape(venue.name)}</a></td>'
             f'<td data-label="District">{escape(district)}</td>'
             f'<td data-label="Events">{summary.event_count} {event_label}</td>'
@@ -3422,13 +3471,18 @@ def _render_venues_content(
     shown_text = f"Showing {start_index} to {end_index} of {total_venues} venues"
     has_prev = current_page > 1
     has_next = current_page < total_pages
+    venue_search_param = (
+        f"&search={quote_plus(search.strip())}" if search.strip() else ""
+    )
     prev_url = (
         f"/?tab=venues&page={current_page - 1}&page_size={normalized_page_size}"
+        f"{venue_search_param}"
         if has_prev
         else "#"
     )
     next_url = (
         f"/?tab=venues&page={current_page + 1}&page_size={normalized_page_size}"
+        f"{venue_search_param}"
         if has_next
         else "#"
     )
@@ -3453,72 +3507,93 @@ def _render_venues_content(
         else '<a class="pagination-link disabled" href="#">Next</a>'
     )
     pagination = f"""
-      <p class="meta">{shown_text}</p>
       <div class="pagination" aria-label="Venue pagination">
         {previous_link}
         <span class="pagination-page">Page {current_page} of {total_pages}</span>
         {next_link}
       </div>
     """
-    return f"""<header class="tab-header"><p class="page-kicker">Catalog</p><h2>Venues</h2>
-      <p class="intro">Browse every venue in the catalog and the events currently associated with it.</p></header>
-      <section class="filter-bar" aria-labelledby="venue-filter-label">
+    encoded_search = escape(search, quote=True)
+    return f"""<section class="filter-bar" aria-labelledby="venue-filter-label">
         <label class="filter-label" id="venue-filter-label" for="venue-filter">Filter venues
-          <input class="filter-input" id="venue-filter" type="search" placeholder="Search by venue or district" autocomplete="off" />
+          <div class="filter-wrapper">
+            <input class="filter-input" id="venue-filter" type="search" name="search"
+              data-bind="venueSearch"
+              data-on:input__debounce_350ms="history.replaceState(null, '', '/?tab=venues&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($venueSearch)); @get('/?tab=venues&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($venueSearch) + '&amp;fragment=1')"
+              value="{encoded_search}" placeholder="Search by venue or district" autocomplete="off" />
+            <button class="filter-clear" id="venue-filter-clear" type="button" aria-label="Clear filter"
+              data-attr="{{'hidden': $venueSearch.length === 0}}"
+              data-on:click="$venueSearch = ''; history.replaceState(null, '', '/?tab=venues&amp;page_size=' + $eventPageSize); @get('/?tab=venues&amp;page_size=' + $eventPageSize + '&amp;fragment=1')">&times;</button>
+          </div>
         </label>
-        <p class="result-count" id="venue-result-count" aria-live="polite">{shown_text}</p>
       </section>
-      <section id="venue-panel" aria-label="Venue list">{empty_table}
-        <p class="empty-state" id="venue-no-match" hidden>No venues match that filter.</p>
-        <table class="event-table"><thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead><tbody>{rows}</tbody></table>
-        {pagination}
+      <section id="venue-panel" class="table-panel" aria-label="Venue list" style="--table-view-height:{_table_view_height(normalized_page_size)}">
+        <div class="table-scroll">
+          {empty_table}
+          <table class="event-table"><thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead><tbody>{rows}</tbody></table>
+        </div>
+        <footer class="table-footer">
+          <p class="meta" id="venue-result-count" aria-live="polite">{shown_text}</p>
+          {pagination}
+        </footer>
       </section>
       <script>
         (() => {{
-          const input = document.querySelector("#venue-filter");
           const rows = [...document.querySelectorAll("[data-venue-row]")];
-          const count = document.querySelector("#venue-result-count");
-          const noMatch = document.querySelector("#venue-no-match");
-          const defaultCount = count.textContent;
-          const pluralize = (number) => `${{number}} venue${{number === 1 ? "" : "s"}}`;
-          const render = () => {{ const query = input.value.trim().toLocaleLowerCase(); let visible = 0;
-            for (const row of rows) {{ const matches = row.dataset.venueSearch.toLocaleLowerCase().includes(query);
-              row.hidden = !matches; if (matches) visible += 1; }}
-            count.textContent = query ? `${{pluralize(visible)}} on this page` : defaultCount;
-            noMatch.hidden = visible !== 0; }};
-          input.addEventListener("input", render);
           for (const row of rows) {{ row.addEventListener("click", (event) => {{
             if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref); }});
             row.addEventListener("keydown", (event) => {{ if (event.key === "Enter" || event.key === " ") {{
               event.preventDefault(); window.location.assign(row.dataset.venueHref); }} }}); }}
-          render();
         }})();
       </script>"""
+
+
+def _filter_venue_summaries(
+    summaries: list[VenueSummary], search: str
+) -> list[VenueSummary]:
+    """Filter the complete venue catalog before pagination."""
+
+    query = search.strip().casefold()
+    if not query:
+        return summaries
+    return [
+        summary
+        for summary in summaries
+        if query
+        in f"{summary.venue.name} {summary.venue.district or 'Not listed'}".casefold()
+    ]
 
 
 def _venue_shell_styles() -> str:
     """Return styles specific to the venue catalog tab."""
 
     return """
-      .tab-header h2 { margin:.1rem 0 .55rem; font-size:1.65rem; }
-      .intro { color:var(--muted); margin:.55rem 0 1.2rem; }
-      .filter-bar { display:flex; align-items:end; justify-content:space-between; gap:1rem;
-        flex-wrap:wrap; margin:1.25rem 0 .8rem; }
+      .filter-bar { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:1rem;
+        margin:1.25rem 0 .8rem; }
       .filter-label { display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
         width:min(28rem,100%); }
       .filter-input { width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
         border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }
       .filter-input:focus,.venue-row:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
-      .result-count { color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }
+      .result-count,.meta { color:var(--muted); font-size:.9rem; margin:0; }
       #venue-panel { margin-top:.5rem; background:var(--surface); border:1px solid var(--line);
         border-radius:var(--radius-lg); padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }
       .venue-row { cursor:pointer; }
       .venue-row:hover td,.venue-row:focus td { background:#f8fafc; }
       .empty-state { color:var(--muted); margin:.35rem 0; }
-      .pagination { display:flex; align-items:center; gap:.75rem; margin:.4rem 0 1rem; }
+      .table-scroll { height:var(--table-view-height); overflow:auto; }
+      .table-footer { display:flex; align-items:center; justify-content:space-between; gap:1rem;
+        min-height:2.5rem; margin-top:.55rem; }
+      .pagination { display:flex; align-items:center; gap:.75rem; margin:0; }
       .pagination-link { border-radius:999px; border:1px solid var(--line); color:var(--text);
         text-decoration:none; padding:.35rem .85rem; font-size:.9rem; background:var(--surface-soft); }
       .pagination-link.disabled { color:#94a3b8; pointer-events:none; background:#f8fafc; }
+      @media (max-width:720px) {
+        .filter-bar { grid-template-columns:minmax(0,1fr); }
+        .filter-label { width:auto; }
+        .table-footer { align-items:flex-start; flex-direction:column; }
+        .pagination { flex-wrap:wrap; }
+      }
     """ + _event_table_styles()
 
 
@@ -3528,6 +3603,7 @@ def _render_venues_page_new(
     table_size: int = DEFAULT_TABLE_SIZE,
     page: int = 1,
     page_size: int | None = None,
+    search: str = "",
 ) -> str:
     """Render the venue catalog using the shared application shell."""
 
@@ -3539,8 +3615,9 @@ def _render_venues_page_new(
             summaries,
             page=page,
             page_size=normalized_page_size,
+            search=search,
         ),
-        signals={"eventPageSize": normalized_page_size},
+        signals={"eventPageSize": normalized_page_size, "venueSearch": search},
     )
 
 
@@ -3589,9 +3666,7 @@ def _render_approval_content(
         )
     )
     empty = '<p class="muted">Nothing is waiting for approval.</p>' if not rows else ""
-    return f"""<header class="tab-header"><p class="page-kicker">Editorial queue</p><h2>Awaiting approval</h2>
-      <p class="muted">Review suggested metadata before it appears as verified information.</p></header>
-      <nav class="tabs" aria-label="Entity filters">{tabs}</nav>
+    return f"""<nav class="tabs" aria-label="Entity filters">{tabs}</nav>
       <section class="card">{empty}<table><thead><tr><th>Type</th><th>Name</th><th>Status</th><th>Suggestions</th></tr></thead><tbody>{rows}</tbody></table></section>"""
 
 
