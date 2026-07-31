@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -34,18 +33,27 @@ import httpx
 from anyio import to_thread
 from litestar import Litestar, Request, get, post
 from litestar.config.csrf import CSRFConfig
-from litestar.connection import ASGIConnection
+from litestar.datastructures import ResponseHeader, State
 from litestar.enums import RequestEncodingType
-from litestar.exceptions import NotAuthorizedException
-from litestar.handlers import BaseRouteHandler
+from litestar.exceptions import NotAuthorizedException, PermissionDeniedException
+from litestar.middleware import DefineMiddleware
 from litestar.middleware.session.server_side import ServerSideSessionConfig
-from litestar.datastructures import ResponseHeader
 from litestar.params import Body, FromPath, FromQuery, QueryParameter
 from litestar.response import Redirect, Response, Stream
 from litestar.static_files import create_static_files_router
-from litestar.stores.memory import MemoryStore
+from litestar.stores.file import FileStore
 from litestar.utils.scope.state import ScopeState
 from pydantic import ValidationError
+
+from berlin_events_explorer.auth import (
+    ROLE_ORDER,
+    SESSION_USER_KEY,
+    SessionUserAuthMiddleware,
+    dummy_password_hash,
+    requires_admin,
+    requires_editor,
+    verify_password,
+)
 
 from berlin_events_explorer.artist_enrichment import (
     DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
@@ -61,6 +69,8 @@ from berlin_events_explorer.models import (
     ArtistRecord,
     ArtistStatus,
     Event,
+    UserRecord,
+    UserRole,
     VenueCandidate,
     VenueMetadata,
     VenueRecord,
@@ -111,10 +121,8 @@ TABLE_ROW_SLOT_REM = 2.75
 TABLE_HEADER_SLOT_REM = 2.4
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
 _SYNC_LOCK = Lock()
-EDITOR_PASSWORD_ENV_VAR = "BERLIN_EVENTS_EDITOR_PASSWORD"
 SECRET_KEY_ENV_VAR = "BERLIN_EVENTS_SECRET_KEY"
 CSRF_HEADER_NAME = "x-csrftoken"
-_SESSION_EDITOR_KEY = "is_editor"
 logger = logging.getLogger(__name__)
 
 
@@ -136,22 +144,20 @@ def _csrf_input(csrf_token: str | None) -> str:
     )
 
 
-def _resolve_csrf_secret(editor_password: str | None) -> str:
+def _resolve_csrf_secret(environment: str) -> str:
     """Choose a restart-stable HMAC secret for CSRF token signing."""
 
     configured = os.environ.get(SECRET_KEY_ENV_VAR)
     if configured:
         return configured
-    if editor_password:
-        return hashlib.sha256(f"csrf::{editor_password}".encode()).hexdigest()
+    if environment == "production":
+        raise ValueError(f"{SECRET_KEY_ENV_VAR} must be set to run in production")
+    logger.warning(
+        "%s is not set; login sessions will not survive a restart of this "
+        "development server",
+        SECRET_KEY_ENV_VAR,
+    )
     return secrets.token_hex(32)
-
-
-def _require_editor(connection: ASGIConnection, _: BaseRouteHandler) -> None:
-    """Allow only clients that completed the editor login."""
-
-    if not connection.session.get(_SESSION_EDITOR_KEY):
-        raise NotAuthorizedException("Editor login required.")
 
 
 def _login_redirect(target: str) -> Redirect:
@@ -169,9 +175,19 @@ def _handle_not_authorized(request: Request, _: Exception) -> Response:
             target = f"{target}?{request.url.query}"
         return _login_redirect(target)
     return Response(
-        content="Editor login required.",
+        content="Login required.",
         media_type="text/plain",
         status_code=401,
+    )
+
+
+def _handle_permission_denied(request: Request, _: Exception) -> Response:
+    """Render a generic 403 for role and CSRF failures alike."""
+
+    return Response(
+        content="Forbidden.",
+        media_type="text/plain",
+        status_code=403,
     )
 
 
@@ -189,7 +205,7 @@ def _render_login_page(
     error: str | None = None,
     csrf_token: str | None = None,
 ) -> str:
-    """Render the editor login form."""
+    """Render the account login form."""
 
     error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
     return f"""<!doctype html>
@@ -197,21 +213,24 @@ def _render_login_page(
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Editor login · Berlin Events Explorer</title>
+    <title>Log in · Berlin Events Explorer</title>
     {theme.head_assets()}
   </head>
   <body class="login-page">
     <a class="skip-link" href="#main">Skip to content</a>
     <main id="main">
       <section class="card">
-        <h1>Editor login</h1>
-        <p>Editorial tools require the editor password.</p>
+        <h1>Log in</h1>
         {error_html}
         <form method="post" action="/login">
           {_csrf_input(csrf_token)}
           <input type="hidden" name="next" value="{escape(next_target, quote=True)}" />
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" required autofocus
+                 autocomplete="username" />
           <label for="password">Password</label>
-          <input id="password" name="password" type="password" required autofocus />
+          <input id="password" name="password" type="password" required
+                 autocomplete="current-password" />
           <button type="submit">Log in</button>
         </form>
         <a class="back-link" href="/">← Back to events</a>
@@ -489,19 +508,13 @@ def create_app(
     sync_interval: timedelta | None = DEFAULT_SYNC_INTERVAL,
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
     environment: str = "production",
-    editor_password: str | None = None,
 ) -> Litestar:
     """Create a Litestar app that renders stored events as HTML."""
 
     store = EventStore(database)
     if environment not in {"development", "production"}:
         raise ValueError("environment must be 'development' or 'production'")
-    editor_password = editor_password or os.environ.get(EDITOR_PASSWORD_ENV_VAR) or None
-    if editor_password is None:
-        logger.warning(
-            "%s is not set; editorial routes will refuse all logins",
-            EDITOR_PASSWORD_ENV_VAR,
-        )
+    csrf_secret = _resolve_csrf_secret(environment)
     if store.get_setting("auto_approve_threshold") is None:
         store.set_setting("auto_approve_threshold", auto_approve_threshold)
     if store.get_setting("musicbrainz_request_interval_seconds") is None:
@@ -526,7 +539,7 @@ def create_app(
         request: Request,
         next_target: Annotated[str | None, QueryParameter(query="next")] = None,
     ) -> Response:
-        """Render the editor login form."""
+        """Render the account login form."""
 
         return Response(
             content=_render_login_page(
@@ -538,39 +551,44 @@ def create_app(
 
     @post("/login")
     async def do_login(request: Request) -> Redirect | Response:
-        """Establish an editor session when the configured password matches."""
+        """Establish a session for the account matching the submitted login."""
 
         form = await request.form()
+        email = _form_string(form, "email")
         supplied = _form_string(form, "password")
         next_target = _safe_next_target(_form_string(form, "next") or "/")
-        if editor_password is None:
+
+        def _authenticate() -> UserRecord | None:
+            credentials = store.get_user_credentials(email)
+            if credentials is None:
+                # Burn the same verification work for unknown addresses so
+                # response timing does not reveal which emails have accounts.
+                verify_password(dummy_password_hash(), supplied)
+                return None
+            if not verify_password(credentials.password_hash, supplied):
+                return None
+            if not credentials.user.is_active:
+                return None
+            store.record_user_login(credentials.user.id)
+            return credentials.user
+
+        user = await to_thread.run_sync(_authenticate)
+        if user is None:
             return Response(
                 content=_render_login_page(
                     next_target,
-                    error="Editor access is not configured on this server.",
+                    error="Invalid email or password.",
                     csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=400,
             )
-        if not secrets.compare_digest(
-            supplied.encode("utf-8"), editor_password.encode("utf-8")
-        ):
-            return Response(
-                content=_render_login_page(
-                    next_target,
-                    error="Incorrect password.",
-                    csrf_token=_csrf_token_from(request),
-                ),
-                media_type="text/html",
-                status_code=400,
-            )
-        request.set_session({_SESSION_EDITOR_KEY: True})
+        request.set_session({SESSION_USER_KEY: user.id})
         return Redirect(next_target, status_code=303)
 
     @post("/logout")
     async def logout(request: Request) -> Redirect:
-        """Terminate the editor session."""
+        """Terminate the session."""
 
         request.clear_session()
         return Redirect("/", status_code=303)
@@ -586,8 +604,12 @@ def create_app(
         entity_type: str = "all",
         fragment: bool = False,
     ) -> Response | Stream:
-        if tab == "approvals" and not request.session.get(_SESSION_EDITOR_KEY):
-            return _login_redirect("/?tab=approvals")
+        if tab == "approvals":
+            user = request.scope.get("user")
+            if user is None:
+                return _login_redirect("/?tab=approvals")
+            if ROLE_ORDER[user.role] < ROLE_ORDER[UserRole.EDITOR]:
+                return Redirect("/", status_code=303)
         if tab == "venues":
             summaries = store.list_venue_summaries()
             normalized_page_size = _normalize_page_size(
@@ -610,6 +632,7 @@ def create_app(
                     page_size=normalized_page_size,
                     search=search,
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                 ),
                 media_type="text/html",
             )
@@ -641,6 +664,7 @@ def create_app(
                     artist_candidate_counts,
                     entity_type=normalized_entity_type,
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                 ),
                 media_type="text/html",
             )
@@ -691,6 +715,7 @@ def create_app(
                 venue_ids_by_event=venue_ids_by_event,
                 artist_ids_by_event_performer=artist_ids_by_event_performer,
                 csrf_token=_csrf_token_from(request),
+                user=request.scope.get("user"),
             ),
             media_type="text/html",
         )
@@ -752,7 +777,7 @@ def create_app(
         )
 
     @get("/dates/{event_date:str}", sync_to_thread=True)
-    def date_events(event_date: str) -> Response:
+    def date_events(request: Request, event_date: str) -> Response:
         """Render all events happening on one calendar date."""
 
         try:
@@ -773,6 +798,7 @@ def create_app(
                 artist_ids_by_event_performer=_verified_artist_ids_by_event_performer(
                     store, event_ids
                 ),
+                user=request.scope.get("user"),
             ),
             media_type="text/html",
         )
@@ -789,7 +815,7 @@ def create_app(
         return Redirect(destination, status_code=303)
 
     @get("/venues/{venue_id:str}", sync_to_thread=True)
-    def venue_detail(venue_id: str) -> Response:
+    def venue_detail(request: Request, venue_id: str) -> Response:
         """Render one canonical venue and its associated events."""
 
         venue = store.get_venue(venue_id)
@@ -801,13 +827,15 @@ def create_app(
             )
         return Response(
             content=_render_venue_detail_page(
-                venue, store.list_events_for_venue(venue_id)
+                venue,
+                store.list_events_for_venue(venue_id),
+                user=request.scope.get("user"),
             ),
             media_type="text/html",
         )
 
     @get("/artists/{artist_id:str}", sync_to_thread=True)
-    def artist_detail(artist_id: str) -> Response:
+    def artist_detail(request: Request, artist_id: str) -> Response:
         """Render a public artist page only after identity approval."""
 
         artist = store.get_artist(artist_id)
@@ -823,11 +851,12 @@ def create_app(
                 store.list_events_for_artist(artist_id),
                 homepage=store.get_artist_official_homepage(artist_id),
                 external_links=store.get_artist_external_links(artist_id),
+                user=request.scope.get("user"),
             ),
             media_type="text/html",
         )
 
-    @get("/approvals", sync_to_thread=True, guards=[_require_editor])
+    @get("/approvals", sync_to_thread=True, guards=[requires_editor])
     def approvals(entity_type: str = "all") -> Redirect:
         """Redirect the legacy queue path to the canonical application URL."""
 
@@ -840,7 +869,7 @@ def create_app(
     # sync_to_thread=True shares its path with another handler, so handlers on
     # shared paths stay async and push blocking work to the thread pool via
     # anyio instead.
-    @get("/approvals/venues/{venue_id:str}", guards=[_require_editor])
+    @get("/approvals/venues/{venue_id:str}", guards=[requires_editor])
     async def venue_approval(
         request: Request,
         venue_id: FromPath[str],
@@ -863,6 +892,7 @@ def create_app(
                     selected,
                     store.list_events_for_venue(venue_id),
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                 ),
                 media_type="text/html",
             )
@@ -872,7 +902,7 @@ def create_app(
     # Shared-path note: Litestar 2.24 mis-wraps a route when both of its
     # handlers use sync_to_thread=True, so the POST siblings of threaded GET
     # handlers stay async and push their blocking work to the thread pool.
-    @post("/approvals/venues/{venue_id:str}", guards=[_require_editor])
+    @post("/approvals/venues/{venue_id:str}", guards=[requires_editor])
     async def approve_venue(
         request: Request,
         venue_id: FromPath[str],
@@ -922,6 +952,7 @@ def create_app(
                         store.list_events_for_venue(venue_id),
                         error=str(exc),
                         csrf_token=_csrf_token_from(request),
+                        user=request.scope.get("user"),
                     ),
                     media_type="text/html",
                     status_code=400,
@@ -938,7 +969,7 @@ def create_app(
     @post(
         "/approvals/venues/{venue_id:str}/discover",
         sync_to_thread=True,
-        guards=[_require_editor],
+        guards=[requires_editor],
     )
     def discover_venue(
         request: Request, venue_id: FromPath[str]
@@ -962,6 +993,7 @@ def create_app(
                     store.list_events_for_venue(venue_id),
                     error=str(exc),
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                 ),
                 media_type="text/html",
                 status_code=502,
@@ -973,7 +1005,7 @@ def create_app(
             )
         return Redirect(f"/approvals/venues/{venue_id}", status_code=303)
 
-    @get("/approvals/artists/{artist_id:str}", guards=[_require_editor])
+    @get("/approvals/artists/{artist_id:str}", guards=[requires_editor])
     async def artist_approval(request: Request, artist_id: FromPath[str]) -> Response:
         """Render a review form for one canonical artist's candidate identities."""
 
@@ -991,13 +1023,14 @@ def create_app(
                     store.list_artist_candidates(artist_id),
                     homepage=store.get_artist_official_homepage(artist_id),
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                 ),
                 media_type="text/html",
             )
 
         return await to_thread.run_sync(_handle)
 
-    @post("/approvals/artists/{artist_id:str}", guards=[_require_editor])
+    @post("/approvals/artists/{artist_id:str}", guards=[requires_editor])
     async def approve_artist(
         request: Request,
         artist_id: FromPath[str],
@@ -1034,6 +1067,7 @@ def create_app(
                         homepage=store.get_artist_official_homepage(artist_id),
                         error=str(exc),
                         csrf_token=_csrf_token_from(request),
+                        user=request.scope.get("user"),
                     ),
                     media_type="text/html",
                     status_code=400,
@@ -1050,7 +1084,7 @@ def create_app(
     @post(
         "/approvals/artists/{artist_id:str}/discover",
         sync_to_thread=True,
-        guards=[_require_editor],
+        guards=[requires_editor],
     )
     def discover_artist(
         request: Request, artist_id: FromPath[str]
@@ -1079,6 +1113,7 @@ def create_app(
                     homepage=store.get_artist_official_homepage(artist_id),
                     error=str(exc),
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                 ),
                 media_type="text/html",
                 status_code=502,
@@ -1090,7 +1125,7 @@ def create_app(
             )
         return Redirect(f"/approvals/artists/{artist_id}", status_code=303)
 
-    @post("/sync", status_code=200, sync_to_thread=True, guards=[_require_editor])
+    @post("/sync", status_code=200, sync_to_thread=True, guards=[requires_editor])
     def sync(
         page: int = 1,
         page_size: int = 0,
@@ -1116,7 +1151,7 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
-    @get("/settings", guards=[_require_editor])
+    @get("/settings", guards=[requires_admin])
     async def settings(
         request: Request,
         saved: FromQuery[str | None] = None,
@@ -1128,6 +1163,7 @@ def create_app(
             return Response(
                 content=_render_settings_page(
                     csrf_token=_csrf_token_from(request),
+                    user=request.scope.get("user"),
                     threshold=_get_auto_approve_threshold(
                         store, auto_approve_threshold
                     ),
@@ -1149,7 +1185,7 @@ def create_app(
 
         return await to_thread.run_sync(_handle)
 
-    @post("/settings", guards=[_require_editor])
+    @post("/settings", guards=[requires_admin])
     async def save_settings(
         request: Request,
         data: Annotated[
@@ -1203,6 +1239,7 @@ def create_app(
                 return Response(
                     content=_render_settings_page(
                         csrf_token=_csrf_token_from(request),
+                        user=request.scope.get("user"),
                         threshold=_get_auto_approve_threshold(
                             store, auto_approve_threshold
                         ),
@@ -1229,7 +1266,7 @@ def create_app(
 
         return await to_thread.run_sync(_handle)
 
-    @post("/settings/clear-database", sync_to_thread=True, guards=[_require_editor])
+    @post("/settings/clear-database", sync_to_thread=True, guards=[requires_admin])
     def clear_database() -> Redirect | Response:
         """Clear synchronized data when this app explicitly runs as development."""
 
@@ -1285,9 +1322,18 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await task
 
+    session_directory = Path(f"{database}.sessions")
+    session_directory.mkdir(parents=True, exist_ok=True)
+    session_store = FileStore(session_directory, create_directories=True)
+
+    @asynccontextmanager
+    async def session_cleanup_lifespan(_: Litestar) -> AsyncIterator[None]:
+        await session_store.delete_expired()
+        yield
+
     session_config = ServerSideSessionConfig()
     csrf_config = CSRFConfig(
-        secret=_resolve_csrf_secret(editor_password),
+        secret=csrf_secret,
         header_name=CSRF_HEADER_NAME,
     )
     return Litestar(
@@ -1316,10 +1362,20 @@ def create_app(
             logout,
             create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
         ],
-        middleware=[session_config.middleware],
+        middleware=[
+            session_config.middleware,
+            DefineMiddleware(
+                SessionUserAuthMiddleware,
+                exclude=["^/static", "^/health", "^/schema"],
+            ),
+        ],
         csrf_config=csrf_config,
-        stores={"sessions": MemoryStore()},
-        exception_handlers={NotAuthorizedException: _handle_not_authorized},
+        stores={"sessions": session_store},
+        state=State({"store": store, "load_user": store.get_user}),
+        exception_handlers={
+            NotAuthorizedException: _handle_not_authorized,
+            PermissionDeniedException: _handle_permission_denied,
+        },
         response_headers=[
             ResponseHeader(
                 name="Content-Security-Policy",
@@ -1332,7 +1388,7 @@ def create_app(
                 name="Referrer-Policy", value="strict-origin-when-cross-origin"
             ),
         ],
-        lifespan=[periodic_sync_lifespan],
+        lifespan=[periodic_sync_lifespan, session_cleanup_lifespan],
     )
 
 
@@ -1454,6 +1510,7 @@ def _render_settings_page(
     cleared: bool = False,
     error: str | None = None,
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render operational settings with a development-only destructive action."""
 
@@ -1528,6 +1585,7 @@ def _render_settings_page(
         show_sync=False,
         show_settings_link=False,
         csrf_token=csrf_token,
+        user=user,
     )
 
 
@@ -1626,6 +1684,7 @@ def _render_venue_approval_form(
     *,
     error: str | None = None,
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render candidate selection and one approval action for current form values."""
 
@@ -1702,6 +1761,7 @@ def _render_venue_approval_form(
         kicker="Venue approval",
         show_sync=False,
         csrf_token=csrf_token,
+        user=user,
     )
 
 
@@ -1712,6 +1772,7 @@ def _render_artist_approval_form(
     homepage: str | None = None,
     error: str | None = None,
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render candidate identity evidence and editable artist fields."""
 
@@ -1766,6 +1827,7 @@ def _render_artist_approval_form(
         kicker="Artist review",
         show_sync=False,
         csrf_token=csrf_token,
+        user=user,
     )
 
 
@@ -1775,6 +1837,7 @@ def _render_artist_detail_page(
     *,
     homepage: str | None = None,
     external_links: dict[str, str] | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render verified canonical artist metadata and associated events."""
 
@@ -1846,6 +1909,7 @@ def _render_artist_detail_page(
         heading=artist.name,
         kicker="Berlin artist",
         show_sync=False,
+        user=user,
     )
 
 
@@ -1855,6 +1919,7 @@ def _render_date_events_page(
     *,
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render the complete event list for one calendar date."""
 
@@ -1880,10 +1945,16 @@ def _render_date_events_page(
         heading=f"Events on {_format_date(target_date)}",
         kicker="Berlin events",
         show_sync=False,
+        user=user,
     )
 
 
-def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
+def _render_venue_detail_page(
+    venue: VenueRecord,
+    events: list[Event],
+    *,
+    user: UserRecord | None = None,
+) -> str:
     """Render a public venue page without exposing unverified candidates."""
 
     address = escape(venue.address) if venue.address else "Details are being verified."
@@ -1958,6 +2029,7 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
         heading=venue.name,
         kicker="Berlin venue",
         show_sync=False,
+        user=user,
     )
 
 
@@ -2612,6 +2684,7 @@ def _render_app_nav(
     recent_days: int = 7,
     search: str = "",
     page_size: int = DEFAULT_PAGE_SIZE,
+    show_approvals: bool = True,
 ) -> str:
     """Render persistent views using one URL-aware in-place navigation contract.
 
@@ -2658,6 +2731,11 @@ def _render_app_nav(
         f"/?tab=upcoming&recent_days={recent_days}&page_size={page_size}"
         f"{upcoming_search_param}"
     )
+    approvals_link = (
+        link("approvals", "Awaiting approval", f"/?tab=approvals&page_size={page_size}")
+        if show_approvals
+        else ""
+    )
     return (
         '<nav class="tabs" aria-label="Application views">'
         + link("recent", "Recently added", recent_href)
@@ -2667,9 +2745,7 @@ def _render_app_nav(
             "Venues",
             f"/?tab=venues&page_size={page_size}{venue_search_param}",
         )
-        + link(
-            "approvals", "Awaiting approval", f"/?tab=approvals&page_size={page_size}"
-        )
+        + approvals_link
         + "</nav>"
     )
 
@@ -2687,6 +2763,7 @@ def _render_app_page(
     show_sync: bool = True,
     show_settings_link: bool = True,
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render the shared document shell around one tab's content fragment.
 
@@ -2737,6 +2814,15 @@ def _render_app_page(
         if show_settings_link
         else ""
     )
+    if user is None:
+        account_html = '<a class="settings-link" href="/login">Log in</a>'
+    else:
+        account_html = (
+            f'<span class="account-name">{escape(user.display_name)}</span>'
+            '<form method="post" action="/logout" class="logout-form">'
+            f"{_csrf_input(csrf_token)}"
+            '<button type="submit" class="logout-button">Log out</button></form>'
+        )
     sync_regions = (
         '<p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>\n'
         '      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>'
@@ -2762,11 +2848,12 @@ def _render_app_page(
           <div class="toolbar-actions">
             {sync_button}
             {settings_link}
+            {account_html}
           </div>
         </div>
       </header>
       {sync_regions}
-      {_render_app_nav(active_tab=active_tab, recent_days=recent_days, search=search, page_size=navigation_page_size)}
+      {_render_app_nav(active_tab=active_tab, recent_days=recent_days, search=search, page_size=navigation_page_size, show_approvals=user is not None and ROLE_ORDER[user.role] >= ROLE_ORDER[UserRole.EDITOR])}
       <section id="tab-content">{content}</section>
     </main>
     <script>window.addEventListener('popstate', () => window.location.reload())</script>
@@ -2878,6 +2965,7 @@ def _render_events_page_new(
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render the events page using the shared application shell."""
 
@@ -2909,6 +2997,7 @@ def _render_events_page_new(
         },
         heading=f"Berlin Events Explorer ({total_count})",
         csrf_token=csrf_token,
+        user=user,
     )
 
 
@@ -3061,6 +3150,7 @@ def _render_venues_page_new(
     page_size: int | None = None,
     search: str = "",
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render the venue catalog using the shared application shell."""
 
@@ -3076,6 +3166,7 @@ def _render_venues_page_new(
         ),
         signals={"eventPageSize": normalized_page_size, "venueSearch": search},
         csrf_token=csrf_token,
+        user=user,
     )
 
 
@@ -3136,6 +3227,7 @@ def _render_approval_queue_new(
     *,
     entity_type: str,
     csrf_token: str | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render the approval queue using the shared application shell."""
 
@@ -3150,6 +3242,7 @@ def _render_approval_queue_new(
             entity_type=entity_type,
         ),
         csrf_token=csrf_token,
+        user=user,
     )
 
 

@@ -56,18 +56,11 @@ def _post(client: TestClient, url: str, **kwargs):
 
 
 def _login(client: TestClient) -> None:
-    """Authenticate a test client as the editor."""
+    """Authenticate a test client with full access (admin account)."""
 
-    from conftest import TEST_EDITOR_PASSWORD
+    from conftest import login_as
 
-    client.get("/login")
-    response = _post(
-        client,
-        "/login",
-        data={"password": TEST_EDITOR_PASSWORD},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
+    login_as(client, role="admin")
 
 
 def _seed_event() -> Event:
@@ -584,6 +577,7 @@ def test_application_navigation_writes_the_canonical_url(tmp_path) -> None:
     """In-place navigation must keep browser history aligned with rendered content."""
 
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)
         response = client.get("/?tab=upcoming&page_size=10")
 
     assert response.status_code == 200
@@ -678,6 +672,7 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
     database = tmp_path / "events.sqlite"
     app = create_app(database)
     with TestClient(app) as client:
+        _login(client)
         response = client.get("/")
 
     assert response.status_code == 200
