@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from urllib.parse import quote_plus, urlparse
 
 import httpx
 from litestar import Litestar, Request, get, post
+from litestar.config.csrf import CSRFConfig
 from litestar.connection import ASGIConnection
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers import BaseRouteHandler
@@ -37,6 +39,7 @@ from litestar.middleware.session.server_side import ServerSideSessionConfig
 from litestar.params import FromPath, FromQuery, QueryParameter
 from litestar.response import Redirect, Response, Stream
 from litestar.stores.memory import MemoryStore
+from litestar.utils.scope.state import ScopeState
 from pydantic import ValidationError
 
 from berlin_events_explorer.artist_enrichment import (
@@ -87,8 +90,39 @@ TABLE_ROW_SLOT_REM = 2.75
 TABLE_HEADER_SLOT_REM = 2.4
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
 EDITOR_PASSWORD_ENV_VAR = "BERLIN_EVENTS_EDITOR_PASSWORD"
+SECRET_KEY_ENV_VAR = "BERLIN_EVENTS_SECRET_KEY"
+CSRF_HEADER_NAME = "x-csrftoken"
 _SESSION_EDITOR_KEY = "is_editor"
 logger = logging.getLogger(__name__)
+
+
+def _csrf_token_from(request: Request) -> str | None:
+    """Return the CSRF token the middleware issued for this request."""
+
+    token = ScopeState.from_scope(request.scope).csrf_token
+    return token if isinstance(token, str) else None
+
+
+def _csrf_input(csrf_token: str | None) -> str:
+    """Render the hidden double-submit field for one HTML form."""
+
+    if not csrf_token:
+        return ""
+    return (
+        '<input type="hidden" name="_csrf_token" '
+        f'value="{escape(csrf_token, quote=True)}" />'
+    )
+
+
+def _resolve_csrf_secret(editor_password: str | None) -> str:
+    """Choose a restart-stable HMAC secret for CSRF token signing."""
+
+    configured = os.environ.get(SECRET_KEY_ENV_VAR)
+    if configured:
+        return configured
+    if editor_password:
+        return hashlib.sha256(f"csrf::{editor_password}".encode()).hexdigest()
+    return secrets.token_hex(32)
 
 
 def _require_editor(connection: ASGIConnection, _: BaseRouteHandler) -> None:
@@ -127,7 +161,12 @@ def _safe_next_target(value: str) -> str:
     return "/"
 
 
-def _render_login_page(next_target: str, *, error: str | None = None) -> str:
+def _render_login_page(
+    next_target: str,
+    *,
+    error: str | None = None,
+    csrf_token: str | None = None,
+) -> str:
     """Render the editor login form."""
 
     error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
@@ -166,6 +205,7 @@ def _render_login_page(next_target: str, *, error: str | None = None) -> str:
         <p>Editorial tools require the editor password.</p>
         {error_html}
         <form method="post" action="/login">
+          {_csrf_input(csrf_token)}
           <input type="hidden" name="next" value="{escape(next_target, quote=True)}" />
           <label for="password">Password</label>
           <input id="password" name="password" type="password" required autofocus />
@@ -467,12 +507,16 @@ def create_app(
 
     @get("/login", sync_to_thread=False)
     def login_page(
+        request: Request,
         next_target: Annotated[str | None, QueryParameter(query="next")] = None,
     ) -> Response:
         """Render the editor login form."""
 
         return Response(
-            content=_render_login_page(_safe_next_target(next_target or "/")),
+            content=_render_login_page(
+                _safe_next_target(next_target or "/"),
+                csrf_token=_csrf_token_from(request),
+            ),
             media_type="text/html",
         )
 
@@ -488,6 +532,7 @@ def create_app(
                 content=_render_login_page(
                     next_target,
                     error="Editor access is not configured on this server.",
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=400,
@@ -496,7 +541,11 @@ def create_app(
             supplied.encode("utf-8"), editor_password.encode("utf-8")
         ):
             return Response(
-                content=_render_login_page(next_target, error="Incorrect password."),
+                content=_render_login_page(
+                    next_target,
+                    error="Incorrect password.",
+                    csrf_token=_csrf_token_from(request),
+                ),
                 media_type="text/html",
                 status_code=400,
             )
@@ -542,6 +591,7 @@ def create_app(
                     page=page,
                     page_size=normalized_page_size,
                     search=search,
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
             )
@@ -589,6 +639,7 @@ def create_app(
                     pending_artists,
                     artist_candidate_counts,
                     entity_type=normalized_entity_type,
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
             )
@@ -621,6 +672,7 @@ def create_app(
             search=search.strip(),
             venue_ids_by_event=venue_ids_by_event,
             artist_ids_by_event_performer=artist_ids_by_event_performer,
+            csrf_token=_csrf_token_from(request),
         )
         if fragment:
             return _render_tab_fragment(
@@ -787,7 +839,9 @@ def create_app(
         guards=[_require_editor],
     )
     def venue_approval(
-        venue_id: FromPath[str], candidate_key: FromQuery[str | None] = None
+        request: Request,
+        venue_id: FromPath[str],
+        candidate_key: FromQuery[str | None] = None,
     ) -> Response:
         """Render a venue-specific approval form and its available suggestions."""
 
@@ -800,7 +854,11 @@ def create_app(
         selected = _select_candidate(candidates, candidate_key)
         return Response(
             content=_render_venue_approval_form(
-                venue, candidates, selected, store.list_events_for_venue(venue_id)
+                venue,
+                candidates,
+                selected,
+                store.list_events_for_venue(venue_id),
+                csrf_token=_csrf_token_from(request),
             ),
             media_type="text/html",
         )
@@ -847,6 +905,7 @@ def create_app(
                     selected,
                     store.list_events_for_venue(venue_id),
                     error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=400,
@@ -863,7 +922,9 @@ def create_app(
         sync_to_thread=True,
         guards=[_require_editor],
     )
-    def discover_venue(venue_id: FromPath[str]) -> Redirect | Response:
+    def discover_venue(
+        request: Request, venue_id: FromPath[str]
+    ) -> Redirect | Response:
         """Explicitly discover candidate metadata for one pending venue."""
 
         venue = store.get_venue(venue_id)
@@ -882,6 +943,7 @@ def create_app(
                     None,
                     store.list_events_for_venue(venue_id),
                     error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=502,
@@ -898,7 +960,7 @@ def create_app(
         sync_to_thread=False,
         guards=[_require_editor],
     )
-    def artist_approval(artist_id: FromPath[str]) -> Response:
+    def artist_approval(request: Request, artist_id: FromPath[str]) -> Response:
         """Render a review form for one canonical artist's candidate identities."""
 
         artist = store.get_artist(artist_id)
@@ -911,6 +973,7 @@ def create_app(
                 artist,
                 store.list_artist_candidates(artist_id),
                 homepage=store.get_artist_official_homepage(artist_id),
+                csrf_token=_csrf_token_from(request),
             ),
             media_type="text/html",
         )
@@ -942,6 +1005,7 @@ def create_app(
                     store.list_artist_candidates(artist_id),
                     homepage=store.get_artist_official_homepage(artist_id),
                     error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=400,
@@ -958,7 +1022,9 @@ def create_app(
         sync_to_thread=True,
         guards=[_require_editor],
     )
-    def discover_artist(artist_id: FromPath[str]) -> Redirect | Response:
+    def discover_artist(
+        request: Request, artist_id: FromPath[str]
+    ) -> Redirect | Response:
         """Explicitly fetch or rehydrate candidate identities for one artist."""
 
         artist = store.get_artist(artist_id)
@@ -982,6 +1048,7 @@ def create_app(
                     store.list_artist_candidates(artist_id),
                     homepage=store.get_artist_official_homepage(artist_id),
                     error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=502,
@@ -1021,6 +1088,7 @@ def create_app(
 
     @get("/settings", sync_to_thread=False, guards=[_require_editor])
     def settings(
+        request: Request,
         saved: FromQuery[str | None] = None,
         cleared: FromQuery[str | None] = None,
     ) -> Response:
@@ -1028,6 +1096,7 @@ def create_app(
 
         return Response(
             content=_render_settings_page(
+                csrf_token=_csrf_token_from(request),
                 threshold=_get_auto_approve_threshold(store, auto_approve_threshold),
                 musicbrainz_request_interval=_get_musicbrainz_request_interval(store),
                 musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
@@ -1090,6 +1159,7 @@ def create_app(
         except ValueError:
             return Response(
                 content=_render_settings_page(
+                    csrf_token=_csrf_token_from(request),
                     threshold=_get_auto_approve_threshold(
                         store, auto_approve_threshold
                     ),
@@ -1157,6 +1227,10 @@ def create_app(
                 await task
 
     session_config = ServerSideSessionConfig()
+    csrf_config = CSRFConfig(
+        secret=_resolve_csrf_secret(editor_password),
+        header_name=CSRF_HEADER_NAME,
+    )
     return Litestar(
         route_handlers=[
             index,
@@ -1182,6 +1256,7 @@ def create_app(
             logout,
         ],
         middleware=[session_config.middleware],
+        csrf_config=csrf_config,
         stores={"sessions": MemoryStore()},
         exception_handlers={NotAuthorizedException: _handle_not_authorized},
         lifespan=[periodic_sync_lifespan],
@@ -1305,6 +1380,7 @@ def _render_settings_page(
     saved: bool = False,
     cleared: bool = False,
     error: str | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render operational settings with a development-only destructive action."""
 
@@ -1317,13 +1393,14 @@ def _render_settings_page(
     if error:
         notices += f'<p class="notice error">{escape(error)}</p>'
     reset = (
-        """
+        f"""
         <section class="settings-card danger-zone">
           <p class="section-label">Development tools</p>
           <h2>Clear application data</h2>
           <p>Remove events, venues, suggestions, provenance, logs, and sync state. Your settings remain.</p>
           <form method="post" action="/settings/clear-database"
             onsubmit="return confirm('Clear all development data? This cannot be undone.');">
+            {_csrf_input(csrf_token)}
             <button class="danger-button" type="submit">Clear development database</button>
           </form>
         </section>
@@ -1385,6 +1462,7 @@ def _render_settings_page(
           <h2>Automatic approval</h2>
           <p>New venues bypass editorial review only when one unambiguous suggestion meets this confidence score.</p>
           <form method="post" action="/settings">
+            {_csrf_input(csrf_token)}
             <label for="threshold">Confidence threshold</label>
             <input id="threshold" name="auto_approve_threshold" type="number"
               min="0" max="1" step="0.01" required value="{threshold:g}" />
@@ -1572,6 +1650,7 @@ def _render_venue_approval_form(
     events: list[Event],
     *,
     error: str | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render candidate selection and one approval action for current form values."""
 
@@ -1630,7 +1709,7 @@ def _render_venue_approval_form(
 </section>
 <h2>Suggestions</h2><div class="suggestions">{suggestions}</div>
 <form method="post" action="/approvals/venues/{escape(venue.id)}" class="card">
-{hidden}<div class="form-grid">
+{_csrf_input(csrf_token)}{hidden}<div class="form-grid">
 {_venue_field("name", "Venue name", venue.name, wide=True)}
 {_venue_field("address", "Address", base_address, wide=True)}
 {_venue_field("postal_code", "Postal code", base_postal_code)}
@@ -1642,6 +1721,7 @@ def _render_venue_approval_form(
 <button type="submit" name="action" value="approve">Approve</button>
 </div></form>
 <form method="post" action="/approvals/venues/{escape(venue.id)}/discover" class="actions">
+{_csrf_input(csrf_token)}
 <button type="submit" class="secondary">Find or refresh suggestions</button></form>
 </main></body></html>"""
 
@@ -1652,6 +1732,7 @@ def _render_artist_approval_form(
     *,
     homepage: str | None = None,
     error: str | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render candidate identity evidence and editable artist fields."""
 
@@ -1688,6 +1769,7 @@ def _render_artist_approval_form(
 <p class="kicker">Artist review</p><h1>{escape(artist.name)}</h1>
 <p class="muted">Choose a suggestion if needed, edit the public fields, then approve the changes.</p>{error_html}
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}" class="card">
+{_csrf_input(csrf_token)}
 <h2>Suggestions</h2><div class="suggestions">{options}</div>
 <div class="form-grid">
 <label class="field-wide">Artist name<input type="text" name="name" required value="{escape(artist.name, quote=True)}" /></label>
@@ -1698,6 +1780,7 @@ def _render_artist_approval_form(
 <label class="field-wide">Official homepage<input type="url" name="official_homepage" value="{escape(homepage or "", quote=True)}" /></label>
 </div><div class="actions"><button type="submit">Approve changes</button></div></form>
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}/discover" class="actions">
+{_csrf_input(csrf_token)}
 <button type="submit" class="secondary">Find or refresh suggestions</button></form>
 </main></body></html>"""
 
@@ -3366,6 +3449,7 @@ def _render_app_page(
     recent_days: int = 7,
     search: str = "",
     heading: str = "Berlin Events Explorer",
+    csrf_token: str | None = None,
 ) -> str:
     """Render the shared document shell around one tab's content fragment."""
 
@@ -3386,10 +3470,13 @@ def _render_app_page(
     if not isinstance(navigation_page_size, int):
         navigation_page_size = DEFAULT_PAGE_SIZE
     serialized_signals = escape(json.dumps(state), quote=True)
+    sync_options = (
+        f", {{headers: {{'{CSRF_HEADER_NAME}': '{csrf_token}'}}}}" if csrf_token else ""
+    )
     sync_action = (
         "@post('sync?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab "
         "+ '&amp;recent_days=' + $eventRecentDays + '&amp;search=' "
-        "+ encodeURIComponent($eventSearch) + '&amp;view=' + $appView)"
+        f"+ encodeURIComponent($eventSearch) + '&amp;view=' + $appView{sync_options})"
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -3565,6 +3652,7 @@ def _render_events_page_new(
     search: str = "",
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render the events page using the shared application shell."""
 
@@ -3595,6 +3683,7 @@ def _render_events_page_new(
             "eventPageSize": page_size,
         },
         heading=f"Berlin Events Explorer ({total_count})",
+        csrf_token=csrf_token,
     )
 
 
@@ -3776,6 +3865,7 @@ def _render_venues_page_new(
     page: int = 1,
     page_size: int | None = None,
     search: str = "",
+    csrf_token: str | None = None,
 ) -> str:
     """Render the venue catalog using the shared application shell."""
 
@@ -3790,6 +3880,7 @@ def _render_venues_page_new(
             search=search,
         ),
         signals={"eventPageSize": normalized_page_size, "venueSearch": search},
+        csrf_token=csrf_token,
     )
 
 
@@ -3849,6 +3940,7 @@ def _render_approval_queue_new(
     artist_candidate_counts: dict[str, int],
     *,
     entity_type: str,
+    csrf_token: str | None = None,
 ) -> str:
     """Render the approval queue using the shared application shell."""
 
@@ -3862,6 +3954,7 @@ def _render_approval_queue_new(
             artist_candidate_counts,
             entity_type=entity_type,
         ),
+        csrf_token=csrf_token,
     )
 
 

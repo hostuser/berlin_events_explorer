@@ -41,12 +41,24 @@ from berlin_events_explorer.webapp import (
 )
 
 
+def _post(client: TestClient, url: str, **kwargs):
+    """POST with the double-submit CSRF header for the client's cookie."""
+
+    headers = dict(kwargs.pop("headers", None) or {})
+    token = client.cookies.get("csrftoken")
+    if token:
+        headers["x-csrftoken"] = token
+    return client.post(url, headers=headers, **kwargs)
+
+
 def _login(client: TestClient) -> None:
     """Authenticate a test client as the editor."""
 
     from conftest import TEST_EDITOR_PASSWORD
 
-    response = client.post(
+    client.get("/login")
+    response = _post(
+        client,
         "/login",
         data={"password": TEST_EDITOR_PASSWORD},
         follow_redirects=False,
@@ -756,7 +768,8 @@ def test_venue_approval_applies_candidate_filled_form(tmp_path) -> None:
 
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
+        response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -791,7 +804,8 @@ def test_venue_approval_can_edit_multiple_suggested_fields(tmp_path) -> None:
 
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
+        response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -829,7 +843,8 @@ def test_venue_approval_rejects_invalid_edits_without_publishing_candidate(
 
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
+        response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -889,8 +904,8 @@ def test_venue_approval_can_discover_suggestions_on_demand(
 
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
-            "/approvals/venues/example-club/discover", follow_redirects=False
+        response = _post(
+            client, "/approvals/venues/example-club/discover", follow_redirects=False
         )
 
     venue = store.get_venue("example-club")
@@ -937,8 +952,8 @@ def test_approval_refresh_never_auto_approves_high_confidence_suggestion(
 
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
-            "/approvals/venues/example-club/discover", follow_redirects=False
+        response = _post(
+            client, "/approvals/venues/example-club/discover", follow_redirects=False
         )
 
     venue = store.get_venue("example-club")
@@ -1001,7 +1016,8 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
     with TestClient(app) as client:
         _login(client)
         edit_response = client.get("/approvals/venues/example-club")
-        save_response = client.post(
+        save_response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -1252,7 +1268,8 @@ def test_settings_page_updates_auto_approval_threshold(tmp_path) -> None:
         _login(client)
         index_response = client.get("/")
         settings_response = client.get("/settings")
-        save_response = client.post(
+        save_response = _post(
+            client,
             "/settings",
             data={
                 "auto_approve_threshold": "0.94",
@@ -1301,7 +1318,8 @@ def test_settings_page_rejects_musicbrainz_metadata_fetch_limit_outside_batch_ra
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
+        response = _post(
+            client,
             "/settings",
             data={
                 "auto_approve_threshold": "0.9",
@@ -1324,7 +1342,8 @@ def test_settings_page_rejects_musicbrainz_fetch_limit_outside_batch_range(
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post(
+        response = _post(
+            client,
             "/settings",
             data={
                 "auto_approve_threshold": "0.9",
@@ -1344,7 +1363,7 @@ def test_settings_page_rejects_threshold_outside_probability_range(tmp_path) -> 
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post("/settings", data={"auto_approve_threshold": "1.5"})
+        response = _post(client, "/settings", data={"auto_approve_threshold": "1.5"})
 
     assert response.status_code == 400
     assert "between 0 and 1" in response.text
@@ -1389,8 +1408,8 @@ def test_manual_sync_uses_threshold_saved_in_settings(tmp_path, monkeypatch) -> 
     monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _fake_sync)
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
         _login(client)
-        client.post("/settings", data={"auto_approve_threshold": "0.96"})
-        response = client.post("/sync")
+        _post(client, "/settings", data={"auto_approve_threshold": "0.96"})
+        response = _post(client, "/sync")
 
     assert response.status_code == 200
     assert received == [0.96]
@@ -1408,7 +1427,9 @@ def test_development_settings_can_clear_content_but_preserve_threshold(
     with TestClient(app) as client:
         _login(client)
         settings_response = client.get("/settings")
-        reset_response = client.post("/settings/clear-database", follow_redirects=False)
+        reset_response = _post(
+            client, "/settings/clear-database", follow_redirects=False
+        )
 
     assert "Clear development database" in settings_response.text
     assert reset_response.status_code == 303
@@ -1424,7 +1445,9 @@ def test_production_settings_do_not_expose_database_reset(tmp_path) -> None:
     with TestClient(app) as client:
         _login(client)
         settings_response = client.get("/settings")
-        reset_response = client.post("/settings/clear-database", follow_redirects=False)
+        reset_response = _post(
+            client, "/settings/clear-database", follow_redirects=False
+        )
 
     assert "Clear development database" not in settings_response.text
     assert reset_response.status_code == 404
@@ -1454,7 +1477,7 @@ def test_webapp_sync_endpoint_runs_sync_and_returns_datastar_events(
     app = create_app(database)
     with TestClient(app) as client:
         _login(client)
-        sync_response = client.post("/sync")
+        sync_response = _post(client, "/sync")
 
     assert sync_response.status_code == 200
     assert sync_response.headers["content-type"].startswith("text/event-stream")
@@ -1489,7 +1512,7 @@ def test_webapp_sync_endpoint_streams_venue_enrichment_progress(
 
     with TestClient(create_app(database)) as client:
         _login(client)
-        response = client.post("/sync")
+        response = _post(client, "/sync")
 
     assert "Enriching venues (0 of 2): Berghain" in response.text
     assert "Enriching venues (1 of 2): Lido" in response.text
@@ -1557,7 +1580,8 @@ def test_artist_approval_queue_and_verified_public_artist_page(
         queue = client.get("/approvals?entity_type=artists")
         form = client.get("/approvals/artists/die-arzte")
         public_before = client.get("/artists/die-arzte")
-        approved = client.post(
+        approved = _post(
+            client,
             "/approvals/artists/die-arzte",
             data={"candidate": candidate.musicbrainz_id},
             follow_redirects=False,
@@ -1593,7 +1617,8 @@ def test_artist_approval_queue_and_verified_public_artist_page(
     with TestClient(create_app(database)) as client:
         _login(client)
         edit_response = client.get("/approvals/artists/die-arzte")
-        save_response = client.post(
+        save_response = _post(
+            client,
             "/approvals/artists/die-arzte",
             data={
                 "candidate": candidate.musicbrainz_id,
@@ -1622,8 +1647,8 @@ def test_artist_approval_queue_and_verified_public_artist_page(
     )
     with TestClient(create_app(database)) as client:
         _login(client)
-        suggestion_response = client.post(
-            "/approvals/artists/die-arzte/discover", follow_redirects=False
+        suggestion_response = _post(
+            client, "/approvals/artists/die-arzte/discover", follow_redirects=False
         )
 
     refreshed_artist = EventStore(database).get_artist("die-arzte")
@@ -1824,7 +1849,8 @@ def test_save_settings_persists_default_table_size(tmp_path) -> None:
     client = TestClient(app)
     _login(client)
 
-    response = client.post(
+    response = _post(
+        client,
         "/settings",
         data={
             "auto_approve_threshold": "0.9",
