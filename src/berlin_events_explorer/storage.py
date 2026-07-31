@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    and_,
     case,
     Column,
+    Computed,
     Connection,
     DateTime,
     Engine,
@@ -24,11 +27,15 @@ from sqlalchemy import (
     create_engine,
     delete,
     distinct,
+    event as sqlalchemy_event,
     func,
     insert,
+    or_,
     select,
     update,
 )
+
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from berlin_events_explorer.migrations import migrate_database
 from berlin_events_explorer.models import (
@@ -41,6 +48,7 @@ from berlin_events_explorer.models import (
     VenueMetadata,
     VenueRecord,
     VenueStatus,
+    event_search_text,
 )
 
 
@@ -54,9 +62,26 @@ events_table = Table(
     Column("provider", String(100), nullable=False, index=True),
     Column("source_record_hash", String(64), nullable=False),
     Column("event_json", JSON, nullable=False),
-    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False, index=True),
     Column("last_seen_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "start_date",
+        String(10),
+        Computed("json_extract(event_json, '$.start_date')", persisted=False),
+        index=True,
+    ),
+    Column(
+        "end_date",
+        String(10),
+        Computed("json_extract(event_json, '$.end_date')", persisted=False),
+    ),
+    Column(
+        "title",
+        Text,
+        Computed("json_extract(event_json, '$.title')", persisted=False),
+    ),
+    Column("search_text", Text),
 )
 venues_table = Table(
     "venues",
@@ -323,12 +348,42 @@ class UpsertResult:
     changes: dict[str, Any]
 
 
+def _configure_sqlite_connection(dbapi_connection: Any, _record: Any) -> None:
+    """Prepare each connection for concurrent webapp and worker access."""
+
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 class EventStore:
     """Persist canonical events and synchronization metadata in SQLite."""
 
     def __init__(self, path: str | Path) -> None:
         migrate_database(path)
         self.engine: Engine = create_engine(f"sqlite:///{Path(path)}")
+        sqlalchemy_event.listen(self.engine, "connect", _configure_sqlite_connection)
+        self._backfill_search_text()
+
+    def _backfill_search_text(self) -> None:
+        """Make rows written before the search column existed searchable."""
+
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(events_table.c.id, events_table.c.event_json).where(
+                    events_table.c.search_text.is_(None)
+                )
+            ).all()
+            for event_id, payload in rows:
+                connection.execute(
+                    update(events_table)
+                    .where(events_table.c.id == event_id)
+                    .values(
+                        search_text=event_search_text(Event.model_validate(payload))
+                    )
+                )
 
     def get_setting(self, key: str) -> Any | None:
         """Return one persisted application setting, if configured."""
@@ -341,23 +396,18 @@ class EventStore:
     def set_setting(self, key: str, value: Any) -> None:
         """Persist one application setting as a JSON-compatible value."""
 
-        now = datetime.now(timezone.utc)
+        statement = sqlite_insert(settings_table).values(
+            key=key, value_json=value, updated_at=datetime.now(timezone.utc)
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[settings_table.c.key],
+            set_={
+                "value_json": statement.excluded.value_json,
+                "updated_at": statement.excluded.updated_at,
+            },
+        )
         with self.engine.begin() as connection:
-            existing = connection.execute(
-                select(settings_table.c.key).where(settings_table.c.key == key)
-            ).scalar_one_or_none()
-            if existing is None:
-                connection.execute(
-                    insert(settings_table).values(
-                        key=key, value_json=value, updated_at=now
-                    )
-                )
-            else:
-                connection.execute(
-                    update(settings_table)
-                    .where(settings_table.c.key == key)
-                    .values(value_json=value, updated_at=now)
-                )
+            connection.execute(statement)
 
     def start_worker_run(self) -> WorkerRun:
         """Record a worker invocation before it begins its first external phase."""
@@ -505,19 +555,17 @@ class EventStore:
             self._save_snapshot(connection, values)
 
     def _save_snapshot(self, connection: Connection, values: dict[str, Any]) -> None:
-        existing = connection.execute(
-            select(snapshots_table.c.provider).where(
-                snapshots_table.c.provider == values["provider"]
+        statement = sqlite_insert(snapshots_table).values(**values)
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[snapshots_table.c.provider],
+                set_={
+                    key: getattr(statement.excluded, key)
+                    for key in values
+                    if key != "provider"
+                },
             )
-        ).scalar_one_or_none()
-        if existing is None:
-            connection.execute(insert(snapshots_table).values(**values))
-        else:
-            connection.execute(
-                update(snapshots_table)
-                .where(snapshots_table.c.provider == values["provider"])
-                .values(**values)
-            )
+        )
 
     def upsert(
         self,
@@ -556,12 +604,17 @@ class EventStore:
                     first_seen_at=event.first_seen_at or now,
                     last_seen_at=event.last_seen_at or now,
                     updated_at=now,
+                    search_text=event_search_text(event),
                 )
             )
             action = "created"
             changes = {"event": {"old": None, "new": payload}}
         else:
             old_payload = existing["event_json"]
+            # The stored first-seen timestamp is authoritative; a re-parsed
+            # payload always carries the current fetch time instead.
+            if old_payload.get("first_seen_at"):
+                payload["first_seen_at"] = old_payload["first_seen_at"]
             changes = _diff_payload(
                 _comparison_payload(old_payload),
                 _comparison_payload(payload),
@@ -582,6 +635,7 @@ class EventStore:
                     event_json=payload,
                     last_seen_at=now,
                     updated_at=now,
+                    search_text=event_search_text(event),
                 )
             )
             action = "updated"
@@ -600,6 +654,96 @@ class EventStore:
     def list_events(self) -> list[Event]:
         with self.engine.connect() as connection:
             rows = connection.execute(select(events_table.c.event_json)).all()
+        return [Event.model_validate(row[0]) for row in rows]
+
+    def query_events(
+        self,
+        *,
+        tab: str,
+        recent_days: int,
+        search: str,
+        page: int,
+        page_size: int,
+        now: datetime | None = None,
+    ) -> tuple[list[Event], int, int, int]:
+        """Filter, sort, and paginate one listing view entirely in SQL.
+
+        Returns the requested page of events, the filtered total, the
+        clamped current page, and the total number of pages.
+        """
+
+        now = now or datetime.now(timezone.utc)
+        today = date.today().isoformat()
+        conditions = []
+        if tab == "recent":
+            conditions.append(
+                events_table.c.first_seen_at >= now - timedelta(days=recent_days)
+            )
+            conditions.append(
+                or_(
+                    events_table.c.start_date.is_(None),
+                    events_table.c.start_date >= today,
+                )
+            )
+            order_by = (events_table.c.first_seen_at.desc(), events_table.c.id)
+        else:
+            conditions.append(events_table.c.start_date.is_not(None))
+            conditions.append(events_table.c.start_date >= today)
+            order_by = (
+                events_table.c.start_date,
+                func.lower(events_table.c.title),
+                events_table.c.id,
+            )
+        needle = search.strip().casefold()
+        if needle:
+            conditions.append(
+                events_table.c.search_text.contains(needle, autoescape=True)
+            )
+
+        with self.engine.connect() as connection:
+            total_count = int(
+                connection.execute(
+                    select(func.count()).select_from(events_table).where(*conditions)
+                ).scalar_one()
+            )
+            total_pages = (
+                max(1, math.ceil(total_count / page_size)) if total_count else 1
+            )
+            current_page = min(max(1, page), total_pages)
+            rows = connection.execute(
+                select(events_table.c.event_json)
+                .where(*conditions)
+                .order_by(*order_by)
+                .limit(page_size)
+                .offset((current_page - 1) * page_size)
+            ).all()
+        events = [Event.model_validate(row[0]) for row in rows]
+        return events, total_count, current_page, total_pages
+
+    def list_events_on_date(self, target_date: date) -> list[Event]:
+        """Return events whose date or date range includes the requested date."""
+
+        iso_date = target_date.isoformat()
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(events_table.c.event_json)
+                .where(
+                    events_table.c.start_date.is_not(None),
+                    or_(
+                        events_table.c.start_date == iso_date,
+                        and_(
+                            events_table.c.end_date.is_not(None),
+                            events_table.c.start_date <= iso_date,
+                            events_table.c.end_date >= iso_date,
+                        ),
+                    ),
+                )
+                .order_by(
+                    events_table.c.start_date,
+                    func.lower(events_table.c.title),
+                    events_table.c.id,
+                )
+            ).all()
         return [Event.model_validate(row[0]) for row in rows]
 
     def upsert_artist(
@@ -861,6 +1005,65 @@ class EventStore:
             ).mappings()
             return [_artist_candidate_from_row(row) for row in rows]
 
+    def count_venue_candidates_by_venue(self) -> dict[str, int]:
+        """Return cached candidate counts for all venues in one query."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(venue_candidates_table.c.venue_id, func.count()).group_by(
+                    venue_candidates_table.c.venue_id
+                )
+            )
+            return {row[0]: int(row[1]) for row in rows}
+
+    def count_artist_candidates_by_artist(self) -> dict[str, int]:
+        """Return cached candidate counts for all artists in one query."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(artist_candidates_table.c.artist_id, func.count()).group_by(
+                    artist_candidates_table.c.artist_id
+                )
+            )
+            return {row[0]: int(row[1]) for row in rows}
+
+    def list_pending_venues(self) -> list[VenueRecord]:
+        """Return venues awaiting editorial review, filtered in SQL."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(venues_table)
+                .where(
+                    venues_table.c.status.not_in(
+                        [
+                            VenueStatus.VERIFIED.value,
+                            VenueStatus.NOT_A_VENUE.value,
+                            VenueStatus.REJECTED.value,
+                        ]
+                    )
+                )
+                .order_by(venues_table.c.name)
+            ).mappings()
+            return [_venue_from_row(row) for row in rows]
+
+    def list_pending_artists(self) -> list[ArtistRecord]:
+        """Return artists awaiting editorial review, filtered in SQL."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(artists_table)
+                .where(
+                    artists_table.c.status.in_(
+                        [
+                            ArtistStatus.UNRESOLVED.value,
+                            ArtistStatus.CANDIDATE.value,
+                        ]
+                    )
+                )
+                .order_by(artists_table.c.name)
+            ).mappings()
+            return [_artist_from_row(row) for row in rows]
+
     def select_artist_candidate(
         self, artist_id: str, provider: str, musicbrainz_id: str
     ) -> ArtistRecord:
@@ -962,24 +1165,25 @@ class EventStore:
                 )
 
     def get_artist_ids_for_event_performers(
-        self, event_ids: list[str]
+        self, event_ids: list[str], *, only_verified: bool = False
     ) -> dict[tuple[str, int], str]:
         """Return artist IDs keyed by event and source billing order."""
 
         if not event_ids:
             return {}
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(
-                    event_artists_table.c.event_id,
-                    event_artists_table.c.billing_order,
-                    event_artists_table.c.artist_id,
-                )
-                .join(
-                    artists_table, event_artists_table.c.artist_id == artists_table.c.id
-                )
-                .where(event_artists_table.c.event_id.in_(event_ids))
+        query = (
+            select(
+                event_artists_table.c.event_id,
+                event_artists_table.c.billing_order,
+                event_artists_table.c.artist_id,
             )
+            .join(artists_table, event_artists_table.c.artist_id == artists_table.c.id)
+            .where(event_artists_table.c.event_id.in_(event_ids))
+        )
+        if only_verified:
+            query = query.where(artists_table.c.status == ArtistStatus.VERIFIED.value)
+        with self.engine.connect() as connection:
+            rows = connection.execute(query)
             return {(row.event_id, row.billing_order): row.artist_id for row in rows}
 
     def list_events_for_artist(self, artist_id: str) -> list[Event]:
@@ -1083,8 +1287,7 @@ class EventStore:
                 func.count(
                     case(
                         (
-                            func.json_extract(events_table.c.event_json, "$.start_date")
-                            >= date.today().isoformat(),
+                            events_table.c.start_date >= date.today().isoformat(),
                             event_venues_table.c.event_id,
                         ),
                     )
@@ -1379,18 +1582,49 @@ class EventStore:
         event_ids: set[str],
         connection: Connection | None = None,
     ) -> int:
-        """Delete provider events absent from a successfully parsed source snapshot."""
+        """Delete provider events absent from a successfully parsed source snapshot.
 
+        An empty snapshot is treated as suspect: rather than wiping the whole
+        provider catalog, nothing is deleted and a warning is logged.
+        """
+
+        stale_ids = select(events_table.c.id).where(events_table.c.provider == provider)
         statement = delete(events_table).where(events_table.c.provider == provider)
         if event_ids:
+            stale_ids = stale_ids.where(events_table.c.id.not_in(event_ids))
             statement = statement.where(events_table.c.id.not_in(event_ids))
+
+        def _delete(conn: Connection) -> int:
+            if not event_ids:
+                existing = self.count_events(provider, connection=conn)
+                if existing:
+                    self.log(
+                        level="warning",
+                        event="empty_snapshot_deletion_skipped",
+                        message=(
+                            f"Source {provider} returned no events; keeping "
+                            f"{existing} stored events instead of deleting them."
+                        ),
+                        context={"provider": provider, "stored_events": existing},
+                        connection=conn,
+                    )
+                return 0
+            conn.execute(
+                delete(event_venues_table).where(
+                    event_venues_table.c.event_id.in_(stale_ids)
+                )
+            )
+            conn.execute(
+                delete(event_artists_table).where(
+                    event_artists_table.c.event_id.in_(stale_ids)
+                )
+            )
+            return conn.execute(statement).rowcount
 
         if connection is None:
             with self.engine.begin() as conn:
-                result = conn.execute(statement)
-        else:
-            result = connection.execute(statement)
-        return result.rowcount
+                return _delete(conn)
+        return _delete(connection)
 
     def list_audit_log(self) -> list[AuditEntry]:
         with self.engine.connect() as connection:

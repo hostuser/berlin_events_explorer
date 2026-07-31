@@ -34,12 +34,11 @@ def bootstrap_venue_catalog(store: EventStore) -> VenueCatalogResult:
     venues_by_normalized_name = {
         venue.normalized_name: venue for venue in store.list_venues()
     }
-    event_venue_ids = store.get_venue_ids_for_events(
-        [event.id for event in store.list_events()]
-    )
+    events = store.list_events()
+    event_venue_ids = store.get_venue_ids_for_events([event.id for event in events])
     created = linked = unchanged = 0
 
-    for event in store.list_events():
+    for event in events:
         if event.venue is None:
             continue
         source_name = event.venue.name.strip()

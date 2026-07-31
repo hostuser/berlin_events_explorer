@@ -2,6 +2,15 @@
 
 import pytest
 
+TEST_EDITOR_PASSWORD = "test-editor-password"
+
+
+@pytest.fixture(autouse=True)
+def _editor_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test app a known editor password."""
+
+    monkeypatch.setenv("BERLIN_EVENTS_EDITOR_PASSWORD", TEST_EDITOR_PASSWORD)
+
 
 @pytest.fixture
 def anyio_backend() -> str:

@@ -52,12 +52,13 @@ def bootstrap_artist_catalog(store: EventStore) -> ArtistCatalogResult:
     artists_by_normalized_name = {
         artist.normalized_name: artist for artist in store.list_artists()
     }
+    events = store.list_events()
     event_artist_ids = store.get_artist_ids_for_event_performers(
-        [event.id for event in store.list_events()]
+        [event.id for event in events]
     )
     created = linked = unchanged = 0
 
-    for event in store.list_events():
+    for event in events:
         for index, performer in enumerate(event.performers, start=1):
             billing_order = performer.billing_order or index
             source_name = performer.name.strip()

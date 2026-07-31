@@ -1,9 +1,13 @@
 """Tests for the Litestar web UI."""
 
 import asyncio
+import inspect
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from diskcache import Cache
 from litestar import Response
 from litestar.testing import TestClient
 
@@ -39,6 +43,31 @@ from berlin_events_explorer.webapp import (
     create_app,
     render_events_page,
 )
+
+
+def _post(client: TestClient, url: str, **kwargs):
+    """POST with the double-submit CSRF header for the client's cookie."""
+
+    headers = dict(kwargs.pop("headers", None) or {})
+    token = client.cookies.get("csrftoken")
+    if token:
+        headers["x-csrftoken"] = token
+    return client.post(url, headers=headers, **kwargs)
+
+
+def _login(client: TestClient) -> None:
+    """Authenticate a test client as the editor."""
+
+    from conftest import TEST_EDITOR_PASSWORD
+
+    client.get("/login")
+    response = _post(
+        client,
+        "/login",
+        data={"password": TEST_EDITOR_PASSWORD},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
 
 
 def _seed_event() -> Event:
@@ -159,7 +188,7 @@ def test_render_events_page_renders_table_rows() -> None:
     assert "requestSubmit" not in page
     assert "data-signals" in page
     assert "Page 1 of 2" in page
-    assert "?page=2&page_size=25" in page
+    assert "?page=2&amp;page_size=25" in page
     assert "Recently added" in page
     assert "Upcoming" in page
     assert '<a class="date-link" href="/dates/2026-07-01">2026-07-01</a>' in page
@@ -453,6 +482,7 @@ def test_top_level_views_share_application_shell(tmp_path, path: str) -> None:
     """Every top-level tab exposes the persistent controls and tab target."""
 
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)
         response = client.get(path)
 
     assert response.status_code == 200
@@ -470,6 +500,7 @@ def test_datastar_tab_fragments_patch_without_blocking_view_transition(
     """Tab actions must leave subsequent tab clicks immediately clickable."""
 
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)
         response = client.get(
             f"{path}&fragment=1" if "?" in path else f"{path}?fragment=1"
         )
@@ -512,12 +543,16 @@ def test_application_navigation_writes_the_canonical_url(tmp_path) -> None:
         response = client.get("/?tab=upcoming&page_size=10")
 
     assert response.status_code == 200
-    assert "history.pushState(null, '', '/?tab=venues&page_size=10')" in response.text
     assert (
-        "history.pushState(null, '', '/?tab=approvals&page_size=10')" in response.text
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=venues&amp;page_size=10&#x27;)"
+        in response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=approvals&amp;page_size=10&#x27;)"
+        in response.text
+    )
+    assert (
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=recent&amp;recent_days=7&amp;page_size=10&#x27;)"
         in response.text
     )
     assert (
@@ -534,19 +569,19 @@ def test_event_search_stays_scoped_to_the_active_event_tab(tmp_path) -> None:
         upcoming_response = client.get("/?tab=upcoming&search=house&page_size=10")
 
     assert (
-        "history.pushState(null, '', '/?tab=upcoming&recent_days=7&page_size=10')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=upcoming&amp;recent_days=7&amp;page_size=10&#x27;)"
         in recent_response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=recent&amp;recent_days=7&amp;page_size=10&#x27;)"
         in upcoming_response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=upcoming&recent_days=7&page_size=10&search=house')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=upcoming&amp;recent_days=7&amp;page_size=10&amp;search=house&#x27;)"
         not in recent_response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10&search=house')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=recent&amp;recent_days=7&amp;page_size=10&amp;search=house&#x27;)"
         not in upcoming_response.text
     )
 
@@ -564,6 +599,7 @@ def test_legacy_top_level_paths_redirect_to_canonical_tab_urls(
     """Top-level application views have one canonical root-route URL shape."""
 
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)
         response = client.get(legacy_path, follow_redirects=False)
 
     assert response.status_code == 303
@@ -583,10 +619,13 @@ def test_event_pagination_uses_in_place_history_navigation() -> None:
     )
 
     assert (
-        "history.pushState(null, '', '/?page=2&page_size=1&tab=upcoming&recent_days=7')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?page=2&amp;page_size=1&amp;tab=upcoming&amp;recent_days=7&#x27;)"
         in page
     )
-    assert "@get('/?page=2&page_size=1&tab=upcoming&recent_days=7&fragment=1')" in page
+    assert (
+        "@get(&#x27;/?page=2&amp;page_size=1&amp;tab=upcoming&amp;recent_days=7&amp;fragment=1&#x27;)"
+        in page
+    )
 
 
 def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
@@ -676,6 +715,7 @@ def test_approval_queue_lists_unapproved_entities_by_type(tmp_path) -> None:
     _seed_pending_venue(store)
 
     with TestClient(create_app(database)) as client:
+        _login(client)
         response = client.get("/approvals")
 
     assert response.status_code == 200
@@ -710,6 +750,7 @@ def test_venue_approval_form_offers_suggestion_and_editable_fields(tmp_path) -> 
     store.link_event_venue(past_event.id, "example-club", source_name="Example Club")
 
     with TestClient(create_app(database)) as client:
+        _login(client)
         response = client.get("/approvals/venues/example-club")
 
     assert response.status_code == 200
@@ -737,7 +778,9 @@ def test_venue_approval_applies_candidate_filled_form(tmp_path) -> None:
     _seed_pending_venue(store)
 
     with TestClient(create_app(database)) as client:
-        response = client.post(
+        _login(client)
+        response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -771,7 +814,9 @@ def test_venue_approval_can_edit_multiple_suggested_fields(tmp_path) -> None:
     _seed_pending_venue(store)
 
     with TestClient(create_app(database)) as client:
-        response = client.post(
+        _login(client)
+        response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -808,7 +853,9 @@ def test_venue_approval_rejects_invalid_edits_without_publishing_candidate(
     _seed_pending_venue(store)
 
     with TestClient(create_app(database)) as client:
-        response = client.post(
+        _login(client)
+        response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -867,8 +914,9 @@ def test_venue_approval_can_discover_suggestions_on_demand(
     )
 
     with TestClient(create_app(database)) as client:
-        response = client.post(
-            "/approvals/venues/example-club/discover", follow_redirects=False
+        _login(client)
+        response = _post(
+            client, "/approvals/venues/example-club/discover", follow_redirects=False
         )
 
     venue = store.get_venue("example-club")
@@ -914,8 +962,9 @@ def test_approval_refresh_never_auto_approves_high_confidence_suggestion(
     )
 
     with TestClient(create_app(database)) as client:
-        response = client.post(
-            "/approvals/venues/example-club/discover", follow_redirects=False
+        _login(client)
+        response = _post(
+            client, "/approvals/venues/example-club/discover", follow_redirects=False
         )
 
     venue = store.get_venue("example-club")
@@ -948,6 +997,7 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
 
     app = create_app(database)
     with TestClient(app) as client:
+        _login(client)
         index_response = client.get("/?tab=recent")
         detail_response = client.get("/venues/example-club")
         suggestion_response = client.get("/approvals/venues/example-club")
@@ -975,8 +1025,10 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
     assert "Find or refresh suggestions" in suggestion_response.text
 
     with TestClient(app) as client:
+        _login(client)
         edit_response = client.get("/approvals/venues/example-club")
-        save_response = client.post(
+        save_response = _post(
+            client,
             "/approvals/venues/example-club",
             data={
                 "action": "approve",
@@ -1224,9 +1276,11 @@ def test_settings_page_updates_auto_approval_threshold(tmp_path) -> None:
     database = tmp_path / "events.sqlite"
     app = create_app(database, auto_approve_threshold=0.9)
     with TestClient(app) as client:
+        _login(client)
         index_response = client.get("/")
         settings_response = client.get("/settings")
-        save_response = client.post(
+        save_response = _post(
+            client,
             "/settings",
             data={
                 "auto_approve_threshold": "0.94",
@@ -1258,6 +1312,7 @@ def test_development_settings_default_musicbrainz_fetch_limit_is_200(tmp_path) -
 
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database, environment="development")) as client:
+        _login(client)
         response = client.get("/settings")
 
     assert 'name="musicbrainz_fetch_limit"' in response.text
@@ -1273,7 +1328,9 @@ def test_settings_page_rejects_musicbrainz_metadata_fetch_limit_outside_batch_ra
 
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database)) as client:
-        response = client.post(
+        _login(client)
+        response = _post(
+            client,
             "/settings",
             data={
                 "auto_approve_threshold": "0.9",
@@ -1295,7 +1352,9 @@ def test_settings_page_rejects_musicbrainz_fetch_limit_outside_batch_range(
 
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database)) as client:
-        response = client.post(
+        _login(client)
+        response = _post(
+            client,
             "/settings",
             data={
                 "auto_approve_threshold": "0.9",
@@ -1314,7 +1373,8 @@ def test_settings_page_rejects_threshold_outside_probability_range(tmp_path) -> 
 
     database = tmp_path / "events.sqlite"
     with TestClient(create_app(database)) as client:
-        response = client.post("/settings", data={"auto_approve_threshold": "1.5"})
+        _login(client)
+        response = _post(client, "/settings", data={"auto_approve_threshold": "1.5"})
 
     assert response.status_code == 400
     assert "between 0 and 1" in response.text
@@ -1358,8 +1418,9 @@ def test_manual_sync_uses_threshold_saved_in_settings(tmp_path, monkeypatch) -> 
 
     monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _fake_sync)
     with TestClient(create_app(tmp_path / "events.sqlite")) as client:
-        client.post("/settings", data={"auto_approve_threshold": "0.96"})
-        response = client.post("/sync")
+        _login(client)
+        _post(client, "/settings", data={"auto_approve_threshold": "0.96"})
+        response = _post(client, "/sync")
 
     assert response.status_code == 200
     assert received == [0.96]
@@ -1375,8 +1436,11 @@ def test_development_settings_can_clear_content_but_preserve_threshold(
     store.upsert(_seed_event())
     app = create_app(database, environment="development")
     with TestClient(app) as client:
+        _login(client)
         settings_response = client.get("/settings")
-        reset_response = client.post("/settings/clear-database", follow_redirects=False)
+        reset_response = _post(
+            client, "/settings/clear-database", follow_redirects=False
+        )
 
     assert "Clear development database" in settings_response.text
     assert reset_response.status_code == 303
@@ -1390,8 +1454,11 @@ def test_production_settings_do_not_expose_database_reset(tmp_path) -> None:
 
     app = create_app(tmp_path / "events.sqlite", environment="production")
     with TestClient(app) as client:
+        _login(client)
         settings_response = client.get("/settings")
-        reset_response = client.post("/settings/clear-database", follow_redirects=False)
+        reset_response = _post(
+            client, "/settings/clear-database", follow_redirects=False
+        )
 
     assert "Clear development database" not in settings_response.text
     assert reset_response.status_code == 404
@@ -1420,7 +1487,8 @@ def test_webapp_sync_endpoint_runs_sync_and_returns_datastar_events(
 
     app = create_app(database)
     with TestClient(app) as client:
-        sync_response = client.post("/sync")
+        _login(client)
+        sync_response = _post(client, "/sync")
 
     assert sync_response.status_code == 200
     assert sync_response.headers["content-type"].startswith("text/event-stream")
@@ -1454,7 +1522,8 @@ def test_webapp_sync_endpoint_streams_venue_enrichment_progress(
     monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _fake_sync)
 
     with TestClient(create_app(database)) as client:
-        response = client.post("/sync")
+        _login(client)
+        response = _post(client, "/sync")
 
     assert "Enriching venues (0 of 2): Berghain" in response.text
     assert "Enriching venues (1 of 2): Lido" in response.text
@@ -1518,10 +1587,12 @@ def test_artist_approval_queue_and_verified_public_artist_page(
         )
 
     with TestClient(create_app(database)) as client:
+        _login(client)
         queue = client.get("/approvals?entity_type=artists")
         form = client.get("/approvals/artists/die-arzte")
         public_before = client.get("/artists/die-arzte")
-        approved = client.post(
+        approved = _post(
+            client,
             "/approvals/artists/die-arzte",
             data={"candidate": candidate.musicbrainz_id},
             follow_redirects=False,
@@ -1555,8 +1626,10 @@ def test_artist_approval_queue_and_verified_public_artist_page(
     assert "Find or refresh suggestions" in suggestion_response.text
 
     with TestClient(create_app(database)) as client:
+        _login(client)
         edit_response = client.get("/approvals/artists/die-arzte")
-        save_response = client.post(
+        save_response = _post(
+            client,
             "/approvals/artists/die-arzte",
             data={
                 "candidate": candidate.musicbrainz_id,
@@ -1584,8 +1657,9 @@ def test_artist_approval_queue_and_verified_public_artist_page(
         lambda self, artist: [candidate],
     )
     with TestClient(create_app(database)) as client:
-        suggestion_response = client.post(
-            "/approvals/artists/die-arzte/discover", follow_redirects=False
+        _login(client)
+        suggestion_response = _post(
+            client, "/approvals/artists/die-arzte/discover", follow_redirects=False
         )
 
     refreshed_artist = EventStore(database).get_artist("die-arzte")
@@ -1768,6 +1842,7 @@ def test_settings_page_includes_default_table_size(tmp_path) -> None:
     store.set_setting("default_table_size", 15)
     app = create_app(database, sync_interval=None, environment="development")
     client = TestClient(app)
+    _login(client)
 
     response = client.get("/settings")
 
@@ -1783,8 +1858,10 @@ def test_save_settings_persists_default_table_size(tmp_path) -> None:
     store = EventStore(database)
     app = create_app(database, sync_interval=None, environment="development")
     client = TestClient(app)
+    _login(client)
 
-    response = client.post(
+    response = _post(
+        client,
         "/settings",
         data={
             "auto_approve_threshold": "0.9",
@@ -1821,3 +1898,243 @@ def test_get_default_table_size_falls_back_to_default(tmp_path) -> None:
 
     store.set_setting("default_table_size", 0)
     assert _get_default_table_size(store) == 20
+
+
+def test_perform_sync_refuses_concurrent_runs(tmp_path, monkeypatch) -> None:
+    """A second sync attempt while one is running should fail fast."""
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_ingest(*_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(webapp, "sync_source_and_ingest_venues", fake_ingest)
+    monkeypatch.setattr(
+        webapp, "open_sync_cache", lambda *a, **k: Cache(str(tmp_path / "cache"))
+    )
+    store = EventStore(tmp_path / "events.sqlite")
+    worker = threading.Thread(target=webapp.perform_sync, args=(store,), daemon=True)
+    worker.start()
+    try:
+        assert started.wait(timeout=5)
+        with pytest.raises(webapp.SyncInProgressError):
+            webapp.perform_sync(store)
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+
+def test_sync_endpoint_reports_sync_already_running(tmp_path, monkeypatch) -> None:
+    """The manual sync stream should surface an active sync as a plain notice."""
+
+    def _busy_sync(*_args, **_kwargs):
+        raise webapp.SyncInProgressError("A sync is already in progress.")
+
+    monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _busy_sync)
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)
+        response = _post(client, "/sync")
+
+    assert response.status_code == 200
+    assert "already in progress" in response.text
+
+
+def test_only_pure_handlers_run_on_the_event_loop(tmp_path) -> None:
+    """Handlers doing database or subprocess work must run in the thread pool."""
+
+    app = create_app(tmp_path / "events.sqlite", sync_interval=None)
+    pure_handlers = {"health", "login_page"}
+    offenders = sorted(
+        {
+            fn.__name__
+            for route in app.routes
+            for handler in getattr(route, "route_handlers", [])
+            if (fn := getattr(handler.fn, "func", handler.fn)).__module__
+            == "berlin_events_explorer.webapp"
+            and not inspect.iscoroutinefunction(fn)
+            and getattr(handler, "sync_to_thread", None) is not True
+            and fn.__name__ not in pure_handlers
+        }
+    )
+    assert offenders == []
+
+
+def test_slow_settings_render_does_not_block_other_requests(
+    tmp_path, monkeypatch
+) -> None:
+    """A stalled worker-thread handler must not stop the event loop serving /health."""
+
+    def slow_render(**_kwargs: object) -> str:
+        time.sleep(1.0)
+        return "settings"
+
+    monkeypatch.setattr(webapp, "_render_settings_page", slow_render)
+    app = create_app(tmp_path / "events.sqlite", sync_interval=None)
+    with TestClient(app) as client:
+        _login(client)
+        started_slow = threading.Event()
+
+        def fetch_settings() -> None:
+            started_slow.set()
+            client.get("/settings")
+
+        worker = threading.Thread(target=fetch_settings, daemon=True)
+        worker.start()
+        assert started_slow.wait(timeout=5)
+        time.sleep(0.2)
+        started = time.perf_counter()
+        assert client.get("/health").status_code == 200
+        elapsed = time.perf_counter() - started
+        worker.join(timeout=5)
+    assert elapsed < 0.6, f"/health took {elapsed:.2f}s while /settings was busy"
+
+
+def test_slow_venue_approval_post_does_not_block_other_requests(
+    tmp_path, monkeypatch
+) -> None:
+    """Form-handling approval endpoints must not do blocking work on the loop."""
+
+    def slow_approve(*_args: object, **_kwargs: object) -> None:
+        time.sleep(1.0)
+        raise ValueError("slow approval")
+
+    monkeypatch.setattr(webapp, "_approve_edited_venue", slow_approve)
+    database = tmp_path / "events.sqlite"
+    EventStore(database).upsert_venue(
+        VenueRecord(id="berghain", name="Berghain", normalized_name="berghain")
+    )
+    app = create_app(database, sync_interval=None)
+    with TestClient(app) as client:
+        _login(client)
+        started_slow = threading.Event()
+
+        def post_approval() -> None:
+            started_slow.set()
+            _post(
+                client,
+                "/approvals/venues/berghain",
+                data={"action": "approve", "name": "Berghain"},
+            )
+
+        worker = threading.Thread(target=post_approval, daemon=True)
+        worker.start()
+        assert started_slow.wait(timeout=5)
+        time.sleep(0.2)
+        started = time.perf_counter()
+        assert client.get("/health").status_code == 200
+        elapsed = time.perf_counter() - started
+        worker.join(timeout=5)
+    assert elapsed < 0.6, f"/health took {elapsed:.2f}s while approval was busy"
+
+
+def test_settings_page_uses_cached_app_version(tmp_path, monkeypatch) -> None:
+    """The settings page must not shell out to git on every request."""
+
+    calls = {"count": 0}
+
+    def counting_git(*_args: str) -> str:
+        calls["count"] += 1
+        return "0.0.7"
+
+    monkeypatch.setattr(webapp, "_run_git", counting_git)
+    webapp._cached_app_version.cache_clear()
+    try:
+        with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+            _login(client)
+            assert client.get("/settings").status_code == 200
+            first_calls = calls["count"]
+            assert client.get("/settings").status_code == 200
+        assert first_calls > 0
+        assert calls["count"] == first_calls
+    finally:
+        webapp._cached_app_version.cache_clear()
+
+
+def test_approvals_tab_avoids_per_row_candidate_queries(tmp_path, monkeypatch) -> None:
+    """The approval queue must not run one candidate query per pending row."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(3):
+        store.upsert_venue(
+            VenueRecord(
+                id=f"venue-{index}",
+                name=f"Venue {index}",
+                normalized_name=f"venue {index}",
+            )
+        )
+    per_row_calls: list[str] = []
+    original_venue = EventStore.list_venue_candidates
+    original_artist = EventStore.list_artist_candidates
+    monkeypatch.setattr(
+        EventStore,
+        "list_venue_candidates",
+        lambda self, venue_id: (
+            per_row_calls.append(venue_id) or original_venue(self, venue_id)
+        ),
+    )
+    monkeypatch.setattr(
+        EventStore,
+        "list_artist_candidates",
+        lambda self, artist_id: (
+            per_row_calls.append(artist_id) or original_artist(self, artist_id)
+        ),
+    )
+
+    with TestClient(create_app(database, sync_interval=None)) as client:
+        _login(client)
+        response = client.get("/?tab=approvals")
+
+    assert response.status_code == 200
+    assert "Venue 0" in response.text
+    assert per_row_calls == []
+
+
+def test_responses_carry_security_headers(tmp_path) -> None:
+    """Every response should ship the baseline security headers."""
+
+    with TestClient(
+        create_app(tmp_path / "events.sqlite", sync_interval=None)
+    ) as client:
+        response = client.get("/")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "frame-src https://www.openstreetmap.org" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "object-src 'none'" in csp
+
+
+def test_datastar_is_served_from_the_same_origin(tmp_path) -> None:
+    """The UI runtime must not depend on a third-party CDN."""
+
+    with TestClient(
+        create_app(tmp_path / "events.sqlite", sync_interval=None)
+    ) as client:
+        page = client.get("/").text
+        asset = client.get("/static/datastar.js")
+
+    assert "cdn.jsdelivr.net" not in page
+    assert 'src="/static/datastar.js"' in page
+    assert asset.status_code == 200
+    assert asset.text.startswith("// Datastar v1.0.0-RC.7")
+
+
+def test_in_place_links_escape_attribute_breakouts() -> None:
+    """Hostile characters in link parts must not escape their HTML context."""
+
+    html = webapp._render_in_place_link(
+        '/x?q="><script>alert(1)</script>',
+        "<b>Label</b>",
+        class_name="tab",
+        app_view="venues",
+    )
+
+    assert "<script>" not in html
+    assert "<b>" not in html
+    assert 'q="><' not in html

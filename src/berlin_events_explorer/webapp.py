@@ -12,24 +12,39 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
+import secrets
 import subprocess
+from functools import cache
 from queue import Queue
-from threading import Thread
+from threading import Lock, Thread
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from html import escape
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Annotated, AsyncIterator
 import math
 from urllib.parse import quote_plus, urlparse
 
 import httpx
+from anyio import to_thread
 from litestar import Litestar, Request, get, post
-from litestar.params import FromPath, FromQuery
+from litestar.config.csrf import CSRFConfig
+from litestar.connection import ASGIConnection
+from litestar.enums import RequestEncodingType
+from litestar.exceptions import NotAuthorizedException
+from litestar.handlers import BaseRouteHandler
+from litestar.middleware.session.server_side import ServerSideSessionConfig
+from litestar.datastructures import ResponseHeader
+from litestar.params import Body, FromPath, FromQuery, QueryParameter
 from litestar.response import Redirect, Response, Stream
+from litestar.static_files import create_static_files_router
+from litestar.stores.memory import MemoryStore
+from litestar.utils.scope.state import ScopeState
 from pydantic import ValidationError
 
 from berlin_events_explorer.artist_enrichment import (
@@ -50,6 +65,7 @@ from berlin_events_explorer.models import (
     VenueMetadata,
     VenueRecord,
     VenueStatus,
+    event_search_text,
 )
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore, VenueSummary
@@ -67,9 +83,23 @@ from berlin_events_explorer.venue_ingestion import (
 from berlin_events_explorer.venues import normalize_venue_name
 from berlin_events_explorer.artists import normalize_artist_name
 
-DATASTAR_SCRIPT = (
-    "https://cdn.jsdelivr.net/gh/starfederation/datastar"
-    "@v1.0.0-RC.7/bundles/datastar.js"
+# Vendored pinned build (v1.0.0-RC.7); served same-origin so the strict CSP
+# below can forbid third-party script hosts entirely.
+DATASTAR_SCRIPT = "/static/datastar.js"
+STATIC_DIRECTORY = Path(__file__).parent / "static"
+# Datastar compiles expressions with the Function constructor and the UI uses
+# inline <script>/<style>, so script-src needs 'unsafe-inline' 'unsafe-eval'.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-src https://www.openstreetmap.org; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'"
 )
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_TABLE_SIZE = 20
@@ -79,7 +109,138 @@ MAX_PAGE_SIZE = 200
 TABLE_ROW_SLOT_REM = 2.75
 TABLE_HEADER_SLOT_REM = 2.4
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
+_SYNC_LOCK = Lock()
+EDITOR_PASSWORD_ENV_VAR = "BERLIN_EVENTS_EDITOR_PASSWORD"
+SECRET_KEY_ENV_VAR = "BERLIN_EVENTS_SECRET_KEY"
+CSRF_HEADER_NAME = "x-csrftoken"
+_SESSION_EDITOR_KEY = "is_editor"
 logger = logging.getLogger(__name__)
+
+
+def _csrf_token_from(request: Request) -> str | None:
+    """Return the CSRF token the middleware issued for this request."""
+
+    token = ScopeState.from_scope(request.scope).csrf_token
+    return token if isinstance(token, str) else None
+
+
+def _csrf_input(csrf_token: str | None) -> str:
+    """Render the hidden double-submit field for one HTML form."""
+
+    if not csrf_token:
+        return ""
+    return (
+        '<input type="hidden" name="_csrf_token" '
+        f'value="{escape(csrf_token, quote=True)}" />'
+    )
+
+
+def _resolve_csrf_secret(editor_password: str | None) -> str:
+    """Choose a restart-stable HMAC secret for CSRF token signing."""
+
+    configured = os.environ.get(SECRET_KEY_ENV_VAR)
+    if configured:
+        return configured
+    if editor_password:
+        return hashlib.sha256(f"csrf::{editor_password}".encode()).hexdigest()
+    return secrets.token_hex(32)
+
+
+def _require_editor(connection: ASGIConnection, _: BaseRouteHandler) -> None:
+    """Allow only clients that completed the editor login."""
+
+    if not connection.session.get(_SESSION_EDITOR_KEY):
+        raise NotAuthorizedException("Editor login required.")
+
+
+def _login_redirect(target: str) -> Redirect:
+    """Send an unauthenticated browser to the login form, preserving intent."""
+
+    return Redirect(f"/login?next={quote_plus(target)}", status_code=303)
+
+
+def _handle_not_authorized(request: Request, _: Exception) -> Response:
+    """Redirect browsers to the login form; non-GET requests get a plain 401."""
+
+    if request.method in {"GET", "HEAD"}:
+        target = request.url.path
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return _login_redirect(target)
+    return Response(
+        content="Editor login required.",
+        media_type="text/plain",
+        status_code=401,
+    )
+
+
+def _safe_next_target(value: str) -> str:
+    """Constrain post-login redirects to same-site absolute paths."""
+
+    if value.startswith("/") and not value.startswith(("//", "/\\")):
+        return value
+    return "/"
+
+
+def _render_login_page(
+    next_target: str,
+    *,
+    error: str | None = None,
+    csrf_token: str | None = None,
+) -> str:
+    """Render the editor login form."""
+
+    error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Editor login · Berlin Events Explorer</title>
+    <style>
+      :root {{ --ink:#111827; --muted:#64748b; --line:#dbe1ea; --paper:#f6f7fb;
+        --card:#fff; --blue:#1d4ed8; --danger:#b42318; }}
+      * {{ box-sizing:border-box; }}
+      body {{ margin:0; color:var(--ink); background:var(--paper);
+        font-family:Inter,"Segoe UI",sans-serif; }}
+      main {{ width:min(26rem,calc(100% - 2rem)); margin:14vh auto 0; }}
+      .card {{ padding:1.5rem; border:1px solid var(--line); border-radius:1rem;
+        background:var(--card); box-shadow:0 18px 50px rgba(15,23,42,.06); }}
+      h1 {{ margin:0 0 .3rem; font-size:1.4rem; }}
+      p {{ color:var(--muted); }}
+      label {{ display:block; margin-top:1rem; font-weight:700; }}
+      input {{ display:block; width:100%; margin:.4rem 0 .3rem; padding:.72rem .8rem;
+        border:1px solid #b9c2d0; border-radius:.65rem; font:inherit; }}
+      button {{ margin-top:.9rem; padding:.72rem 1rem; border:0; border-radius:.65rem;
+        background:var(--blue); color:#fff; font:inherit; font-weight:750; cursor:pointer; }}
+      input:focus,a:focus,button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
+      .notice.error {{ padding:.8rem 1rem; border-radius:.7rem; font-weight:650;
+        color:var(--danger); background:#fee4e2; }}
+      .back-link {{ display:inline-block; margin-top:1rem; color:var(--blue); }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <h1>Editor login</h1>
+        <p>Editorial tools require the editor password.</p>
+        {error_html}
+        <form method="post" action="/login">
+          {_csrf_input(csrf_token)}
+          <input type="hidden" name="next" value="{escape(next_target, quote=True)}" />
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" required autofocus />
+          <button type="submit">Log in</button>
+        </form>
+        <a class="back-link" href="/">← Back to events</a>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+class SyncInProgressError(RuntimeError):
+    """Raised when a synchronization pass is already running in this process."""
 
 
 def _run_git(*args: str) -> str | None:
@@ -109,6 +270,13 @@ def _get_app_version() -> str:
     if commit:
         return f"git:{commit}"
     return PACKAGE_VERSION
+
+
+@cache
+def _cached_app_version() -> str:
+    """Resolve the application version once; it cannot change while running."""
+
+    return _get_app_version()
 
 
 def _form_string(form: Mapping[str, object], key: str) -> str:
@@ -327,6 +495,8 @@ async def _periodic_sync(
                     store, auto_approve_threshold
                 ),
             )
+        except SyncInProgressError:
+            logger.info("Skipping scheduled sync; another sync is already running")
         except Exception:
             logger.exception("Scheduled event sync failed")
 
@@ -337,12 +507,19 @@ def create_app(
     sync_interval: timedelta | None = DEFAULT_SYNC_INTERVAL,
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
     environment: str = "production",
+    editor_password: str | None = None,
 ) -> Litestar:
     """Create a Litestar app that renders stored events as HTML."""
 
     store = EventStore(database)
     if environment not in {"development", "production"}:
         raise ValueError("environment must be 'development' or 'production'")
+    editor_password = editor_password or os.environ.get(EDITOR_PASSWORD_ENV_VAR) or None
+    if editor_password is None:
+        logger.warning(
+            "%s is not set; editorial routes will refuse all logins",
+            EDITOR_PASSWORD_ENV_VAR,
+        )
     if store.get_setting("auto_approve_threshold") is None:
         store.set_setting("auto_approve_threshold", auto_approve_threshold)
     if store.get_setting("musicbrainz_request_interval_seconds") is None:
@@ -362,8 +539,63 @@ def create_app(
     if store.get_setting("default_table_size") is None:
         store.set_setting("default_table_size", DEFAULT_TABLE_SIZE)
 
+    @get("/login", sync_to_thread=False)
+    def login_page(
+        request: Request,
+        next_target: Annotated[str | None, QueryParameter(query="next")] = None,
+    ) -> Response:
+        """Render the editor login form."""
+
+        return Response(
+            content=_render_login_page(
+                _safe_next_target(next_target or "/"),
+                csrf_token=_csrf_token_from(request),
+            ),
+            media_type="text/html",
+        )
+
+    @post("/login")
+    async def do_login(request: Request) -> Redirect | Response:
+        """Establish an editor session when the configured password matches."""
+
+        form = await request.form()
+        supplied = _form_string(form, "password")
+        next_target = _safe_next_target(_form_string(form, "next") or "/")
+        if editor_password is None:
+            return Response(
+                content=_render_login_page(
+                    next_target,
+                    error="Editor access is not configured on this server.",
+                    csrf_token=_csrf_token_from(request),
+                ),
+                media_type="text/html",
+                status_code=400,
+            )
+        if not secrets.compare_digest(
+            supplied.encode("utf-8"), editor_password.encode("utf-8")
+        ):
+            return Response(
+                content=_render_login_page(
+                    next_target,
+                    error="Incorrect password.",
+                    csrf_token=_csrf_token_from(request),
+                ),
+                media_type="text/html",
+                status_code=400,
+            )
+        request.set_session({_SESSION_EDITOR_KEY: True})
+        return Redirect(next_target, status_code=303)
+
+    @post("/logout")
+    async def logout(request: Request) -> Redirect:
+        """Terminate the editor session."""
+
+        request.clear_session()
+        return Redirect("/", status_code=303)
+
     @get("/", sync_to_thread=True)
     def index(
+        request: Request,
         page: int = 1,
         page_size: int = 0,
         tab: str = "recent",
@@ -372,65 +604,53 @@ def create_app(
         entity_type: str = "all",
         fragment: bool = False,
     ) -> Response | Stream:
+        if tab == "approvals" and not request.session.get(_SESSION_EDITOR_KEY):
+            return _login_redirect("/?tab=approvals")
         if tab == "venues":
             summaries = store.list_venue_summaries()
             normalized_page_size = _normalize_page_size(
                 page_size or _get_default_table_size(store)
             )
-            content = _render_venues_content(
-                summaries,
-                page=page,
-                page_size=normalized_page_size,
-                search=search,
-            )
             if fragment:
-                return _render_tab_fragment(content, event_count=0)
+                return _render_tab_fragment(
+                    _render_venues_content(
+                        summaries,
+                        page=page,
+                        page_size=normalized_page_size,
+                        search=search,
+                    ),
+                    event_count=0,
+                )
             return Response(
                 content=_render_venues_page(
                     summaries,
                     page=page,
                     page_size=normalized_page_size,
                     search=search,
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
             )
 
         if tab == "approvals":
-            pending_venues = [
-                venue
-                for venue in store.list_venues()
-                if venue.status
-                not in {
-                    VenueStatus.VERIFIED,
-                    VenueStatus.NOT_A_VENUE,
-                    VenueStatus.REJECTED,
-                }
-            ]
-            candidate_counts = {
-                venue.id: len(store.list_venue_candidates(venue.id))
-                for venue in pending_venues
-            }
-            pending_artists = [
-                artist
-                for artist in store.list_artists()
-                if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
-            ]
-            artist_candidate_counts = {
-                artist.id: len(store.list_artist_candidates(artist.id))
-                for artist in pending_artists
-            }
+            pending_venues = store.list_pending_venues()
+            candidate_counts = store.count_venue_candidates_by_venue()
+            pending_artists = store.list_pending_artists()
+            artist_candidate_counts = store.count_artist_candidates_by_artist()
             normalized_entity_type = (
                 entity_type if entity_type in {"all", "venues", "artists"} else "all"
             )
-            content = _render_approval_content(
-                pending_venues,
-                candidate_counts,
-                pending_artists,
-                artist_candidate_counts,
-                entity_type=normalized_entity_type,
-            )
             if fragment:
-                return _render_tab_fragment(content, event_count=0)
+                return _render_tab_fragment(
+                    _render_approval_content(
+                        pending_venues,
+                        candidate_counts,
+                        pending_artists,
+                        artist_candidate_counts,
+                        entity_type=normalized_entity_type,
+                    ),
+                    event_count=0,
+                )
             return Response(
                 content=_render_approval_queue(
                     pending_venues,
@@ -438,6 +658,7 @@ def create_app(
                     pending_artists,
                     artist_candidate_counts,
                     entity_type=normalized_entity_type,
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
             )
@@ -459,18 +680,6 @@ def create_app(
             recent_days=recent_days,
             search=search,
         )
-        html = render_events_page(
-            paged_events,
-            total_count=filtered_count,
-            page=current_page,
-            page_size=normalized_page_size,
-            total_pages=total_pages,
-            tab=tab,
-            recent_days=normalized_days,
-            search=search.strip(),
-            venue_ids_by_event=venue_ids_by_event,
-            artist_ids_by_event_performer=artist_ids_by_event_performer,
-        )
         if fragment:
             return _render_tab_fragment(
                 _render_event_content(
@@ -487,7 +696,22 @@ def create_app(
                 ),
                 event_count=filtered_count,
             )
-        return Response(content=html, media_type="text/html")
+        return Response(
+            content=render_events_page(
+                paged_events,
+                total_count=filtered_count,
+                page=current_page,
+                page_size=normalized_page_size,
+                total_pages=total_pages,
+                tab=tab,
+                recent_days=normalized_days,
+                search=search.strip(),
+                venue_ids_by_event=venue_ids_by_event,
+                artist_ids_by_event_performer=artist_ids_by_event_performer,
+                csrf_token=_csrf_token_from(request),
+            ),
+            media_type="text/html",
+        )
 
     @get("/events/search", sync_to_thread=True)
     def search_events(
@@ -530,9 +754,7 @@ def create_app(
         return Stream(
             content=(
                 (
-                    _sse_event(
-                        "datastar-patch-elements", f"elements {events_panel}"
-                    )
+                    _sse_event("datastar-patch-elements", f"elements {events_panel}")
                     + _sse_event(
                         "datastar-patch-signals",
                         _signals_payload(
@@ -559,7 +781,7 @@ def create_app(
                 media_type="text/html",
                 status_code=404,
             )
-        events = _events_on_date(list(store.list_events()), target_date=target_date)
+        events = store.list_events_on_date(target_date)
         event_ids = [event.id for event in events]
         return Response(
             content=_render_date_events_page(
@@ -623,7 +845,7 @@ def create_app(
             media_type="text/html",
         )
 
-    @get("/approvals", sync_to_thread=True)
+    @get("/approvals", sync_to_thread=True, guards=[_require_editor])
     def approvals(entity_type: str = "all") -> Redirect:
         """Redirect the legacy queue path to the canonical application URL."""
 
@@ -632,81 +854,113 @@ def create_app(
             destination += f"&entity_type={quote_plus(entity_type)}"
         return Redirect(destination, status_code=303)
 
-    @get("/approvals/venues/{venue_id:str}", sync_to_thread=False)
-    def venue_approval(
-        venue_id: FromPath[str], candidate_key: FromQuery[str | None] = None
+    # Shared-path note: Litestar 2.24 mis-wraps a route when a handler with
+    # sync_to_thread=True shares its path with another handler, so handlers on
+    # shared paths stay async and push blocking work to the thread pool via
+    # anyio instead.
+    @get("/approvals/venues/{venue_id:str}", guards=[_require_editor])
+    async def venue_approval(
+        request: Request,
+        venue_id: FromPath[str],
+        candidate_key: FromQuery[str | None] = None,
     ) -> Response:
         """Render a venue-specific approval form and its available suggestions."""
 
-        venue = store.get_venue(venue_id)
-        if venue is None:
-            return Response(
-                "<h1>Venue not found</h1>", media_type="text/html", status_code=404
-            )
-        candidates = store.list_venue_candidates(venue_id)
-        selected = _select_candidate(candidates, candidate_key)
-        return Response(
-            content=_render_venue_approval_form(
-                venue, candidates, selected, store.list_events_for_venue(venue_id)
-            ),
-            media_type="text/html",
-        )
-
-    @post("/approvals/venues/{venue_id:str}")
-    async def approve_venue(
-        venue_id: FromPath[str], request: Request
-    ) -> Redirect | Response:
-        """Approve the venue using the values currently submitted by its form."""
-
-        form = await request.form()
-        current = store.get_venue(venue_id)
-        action = _form_string(form, "action")
-        provider = _form_string(form, "provider")
-        osm_type = _form_string(form, "osm_type")
-        osm_id = _form_string(form, "osm_id")
-        try:
-            if action == "approve":
-                _approve_edited_venue(
-                    store,
-                    venue_id=venue_id,
-                    form=form,
-                    provider=provider or None,
-                    osm_type=osm_type or None,
-                    osm_id=osm_id or None,
-                )
-            else:
-                raise ValueError("Unsupported approval action.")
-        except (ValueError, ValidationError) as exc:
+        def _handle() -> Response:
             venue = store.get_venue(venue_id)
             if venue is None:
                 return Response(
                     "<h1>Venue not found</h1>", media_type="text/html", status_code=404
                 )
             candidates = store.list_venue_candidates(venue_id)
-            selected = _select_candidate(
-                candidates,
-                _candidate_key_from_parts(provider, osm_type, osm_id),
-            )
+            selected = _select_candidate(candidates, candidate_key)
             return Response(
                 content=_render_venue_approval_form(
                     venue,
                     candidates,
                     selected,
                     store.list_events_for_venue(venue_id),
-                    error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
-                status_code=400,
             )
-        destination = (
-            f"/venues/{venue_id}"
-            if current is not None and current.status is VenueStatus.VERIFIED
-            else "/approvals"
-        )
-        return Redirect(destination, status_code=303)
 
-    @post("/approvals/venues/{venue_id:str}/discover", sync_to_thread=True)
-    def discover_venue(venue_id: FromPath[str]) -> Redirect | Response:
+        return await to_thread.run_sync(_handle)
+
+    # Shared-path note: Litestar 2.24 mis-wraps a route when both of its
+    # handlers use sync_to_thread=True, so the POST siblings of threaded GET
+    # handlers stay async and push their blocking work to the thread pool.
+    @post("/approvals/venues/{venue_id:str}", guards=[_require_editor])
+    async def approve_venue(
+        request: Request,
+        venue_id: FromPath[str],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Approve the venue using the values currently submitted by its form."""
+
+        def _handle() -> Redirect | Response:
+            form = data
+            current = store.get_venue(venue_id)
+            action = _form_string(form, "action")
+            provider = _form_string(form, "provider")
+            osm_type = _form_string(form, "osm_type")
+            osm_id = _form_string(form, "osm_id")
+            try:
+                if action == "approve":
+                    _approve_edited_venue(
+                        store,
+                        venue_id=venue_id,
+                        form=form,
+                        provider=provider or None,
+                        osm_type=osm_type or None,
+                        osm_id=osm_id or None,
+                    )
+                else:
+                    raise ValueError("Unsupported approval action.")
+            except (ValueError, ValidationError) as exc:
+                venue = store.get_venue(venue_id)
+                if venue is None:
+                    return Response(
+                        "<h1>Venue not found</h1>",
+                        media_type="text/html",
+                        status_code=404,
+                    )
+                candidates = store.list_venue_candidates(venue_id)
+                selected = _select_candidate(
+                    candidates,
+                    _candidate_key_from_parts(provider, osm_type, osm_id),
+                )
+                return Response(
+                    content=_render_venue_approval_form(
+                        venue,
+                        candidates,
+                        selected,
+                        store.list_events_for_venue(venue_id),
+                        error=str(exc),
+                        csrf_token=_csrf_token_from(request),
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            destination = (
+                f"/venues/{venue_id}"
+                if current is not None and current.status is VenueStatus.VERIFIED
+                else "/approvals"
+            )
+            return Redirect(destination, status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
+    @post(
+        "/approvals/venues/{venue_id:str}/discover",
+        sync_to_thread=True,
+        guards=[_require_editor],
+    )
+    def discover_venue(
+        request: Request, venue_id: FromPath[str]
+    ) -> Redirect | Response:
         """Explicitly discover candidate metadata for one pending venue."""
 
         venue = store.get_venue(venue_id)
@@ -725,6 +979,7 @@ def create_app(
                     None,
                     store.list_events_for_venue(venue_id),
                     error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=502,
@@ -736,64 +991,88 @@ def create_app(
             )
         return Redirect(f"/approvals/venues/{venue_id}", status_code=303)
 
-    @get("/approvals/artists/{artist_id:str}", sync_to_thread=False)
-    def artist_approval(artist_id: FromPath[str]) -> Response:
+    @get("/approvals/artists/{artist_id:str}", guards=[_require_editor])
+    async def artist_approval(request: Request, artist_id: FromPath[str]) -> Response:
         """Render a review form for one canonical artist's candidate identities."""
 
-        artist = store.get_artist(artist_id)
-        if artist is None:
-            return Response(
-                "<h1>Artist not found</h1>", media_type="text/html", status_code=404
-            )
-        return Response(
-            content=_render_artist_approval_form(
-                artist,
-                store.list_artist_candidates(artist_id),
-                homepage=store.get_artist_official_homepage(artist_id),
-            ),
-            media_type="text/html",
-        )
-
-    @post("/approvals/artists/{artist_id:str}")
-    async def approve_artist(
-        artist_id: FromPath[str], request: Request
-    ) -> Redirect | Response:
-        """Apply reviewed identity data and manually edited artist fields."""
-
-        form = await request.form()
-        candidate_id = _form_string(form, "candidate")
-        current = store.get_artist(artist_id)
-        try:
-            if candidate_id:
-                store.select_artist_candidate(artist_id, "musicbrainz", candidate_id)
-            elif current is None or current.status is not ArtistStatus.VERIFIED:
-                raise ValueError("Select an artist candidate before approving.")
-            _save_edited_artist(store, artist_id=artist_id, form=form)
-        except (ValueError, ValidationError) as exc:
+        def _handle() -> Response:
             artist = store.get_artist(artist_id)
             if artist is None:
                 return Response(
-                    "<h1>Artist not found</h1>", media_type="text/html", status_code=404
+                    "<h1>Artist not found</h1>",
+                    media_type="text/html",
+                    status_code=404,
                 )
             return Response(
                 content=_render_artist_approval_form(
                     artist,
                     store.list_artist_candidates(artist_id),
                     homepage=store.get_artist_official_homepage(artist_id),
-                    error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
-                status_code=400,
             )
-        destination = (
-            f"/artists/{artist_id}"
-            if current is not None and current.status is ArtistStatus.VERIFIED
-            else "/approvals?entity_type=artists"
-        )
-        return Redirect(destination, status_code=303)
 
-    @post("/approvals/artists/{artist_id:str}/discover", sync_to_thread=True)
-    def discover_artist(artist_id: FromPath[str]) -> Redirect | Response:
+        return await to_thread.run_sync(_handle)
+
+    @post("/approvals/artists/{artist_id:str}", guards=[_require_editor])
+    async def approve_artist(
+        request: Request,
+        artist_id: FromPath[str],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Apply reviewed identity data and manually edited artist fields."""
+
+        def _handle() -> Redirect | Response:
+            form = data
+            candidate_id = _form_string(form, "candidate")
+            current = store.get_artist(artist_id)
+            try:
+                if candidate_id:
+                    store.select_artist_candidate(
+                        artist_id, "musicbrainz", candidate_id
+                    )
+                elif current is None or current.status is not ArtistStatus.VERIFIED:
+                    raise ValueError("Select an artist candidate before approving.")
+                _save_edited_artist(store, artist_id=artist_id, form=form)
+            except (ValueError, ValidationError) as exc:
+                artist = store.get_artist(artist_id)
+                if artist is None:
+                    return Response(
+                        "<h1>Artist not found</h1>",
+                        media_type="text/html",
+                        status_code=404,
+                    )
+                return Response(
+                    content=_render_artist_approval_form(
+                        artist,
+                        store.list_artist_candidates(artist_id),
+                        homepage=store.get_artist_official_homepage(artist_id),
+                        error=str(exc),
+                        csrf_token=_csrf_token_from(request),
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            destination = (
+                f"/artists/{artist_id}"
+                if current is not None and current.status is ArtistStatus.VERIFIED
+                else "/approvals?entity_type=artists"
+            )
+            return Redirect(destination, status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
+    @post(
+        "/approvals/artists/{artist_id:str}/discover",
+        sync_to_thread=True,
+        guards=[_require_editor],
+    )
+    def discover_artist(
+        request: Request, artist_id: FromPath[str]
+    ) -> Redirect | Response:
         """Explicitly fetch or rehydrate candidate identities for one artist."""
 
         artist = store.get_artist(artist_id)
@@ -817,6 +1096,7 @@ def create_app(
                     store.list_artist_candidates(artist_id),
                     homepage=store.get_artist_official_homepage(artist_id),
                     error=str(exc),
+                    csrf_token=_csrf_token_from(request),
                 ),
                 media_type="text/html",
                 status_code=502,
@@ -828,7 +1108,7 @@ def create_app(
             )
         return Redirect(f"/approvals/artists/{artist_id}", status_code=303)
 
-    @post("/sync", status_code=200, sync_to_thread=True)
+    @post("/sync", status_code=200, sync_to_thread=True, guards=[_require_editor])
     def sync(
         page: int = 1,
         page_size: int = 0,
@@ -854,77 +1134,18 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
-    @get("/settings", sync_to_thread=False)
-    def settings(
+    @get("/settings", guards=[_require_editor])
+    async def settings(
+        request: Request,
         saved: FromQuery[str | None] = None,
         cleared: FromQuery[str | None] = None,
     ) -> Response:
         """Render persisted application configuration and development tools."""
 
-        return Response(
-            content=_render_settings_page(
-                threshold=_get_auto_approve_threshold(store, auto_approve_threshold),
-                musicbrainz_request_interval=_get_musicbrainz_request_interval(store),
-                musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
-                musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
-                    store
-                ),
-                default_table_size=_get_default_table_size(store),
-                environment=environment,
-                version=_get_app_version(),
-                saved=saved == "1",
-                cleared=cleared == "1",
-            ),
-            media_type="text/html",
-        )
-
-    @post("/settings")
-    async def save_settings(request: Request) -> Redirect | Response:
-        """Validate and persist settings used by subsequent synchronization passes."""
-
-        form = await request.form()
-        raw_threshold = _form_string(form, "auto_approve_threshold")
-        raw_interval = _form_string(form, "musicbrainz_request_interval_seconds")
-        raw_fetch_limit = _form_string(form, "musicbrainz_fetch_limit")
-        raw_metadata_fetch_limit = _form_string(
-            form, "musicbrainz_metadata_fetch_limit"
-        )
-        raw_table_size = _form_string(form, "default_table_size")
-        try:
-            threshold = float(raw_threshold)
-            interval = (
-                float(raw_interval)
-                if raw_interval
-                else _get_musicbrainz_request_interval(store)
-            )
-            fetch_limit = (
-                int(raw_fetch_limit)
-                if raw_fetch_limit
-                else _get_musicbrainz_fetch_limit(store)
-            )
-            metadata_fetch_limit = (
-                int(raw_metadata_fetch_limit)
-                if raw_metadata_fetch_limit
-                else _get_musicbrainz_metadata_fetch_limit(store)
-            )
-            table_size = (
-                int(raw_table_size)
-                if raw_table_size
-                else _get_default_table_size(store)
-            )
-            if not math.isfinite(threshold) or not 0 <= threshold <= 1:
-                raise ValueError
-            if not math.isfinite(interval) or not 1.0 <= interval <= 300:
-                raise ValueError
-            if not 1 <= fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
-                raise ValueError
-            if not 1 <= metadata_fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
-                raise ValueError
-            if not 1 <= table_size <= MAX_PAGE_SIZE:
-                raise ValueError
-        except ValueError:
+        def _handle() -> Response:
             return Response(
                 content=_render_settings_page(
+                    csrf_token=_csrf_token_from(request),
                     threshold=_get_auto_approve_threshold(
                         store, auto_approve_threshold
                     ),
@@ -932,24 +1153,101 @@ def create_app(
                         store
                     ),
                     musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
-                    musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
-                        store
+                    musicbrainz_metadata_fetch_limit=(
+                        _get_musicbrainz_metadata_fetch_limit(store)
                     ),
                     default_table_size=_get_default_table_size(store),
                     environment=environment,
-                    error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000; table size must be 1–200.",
+                    version=_cached_app_version(),
+                    saved=saved == "1",
+                    cleared=cleared == "1",
                 ),
                 media_type="text/html",
-                status_code=400,
             )
-        store.set_setting("auto_approve_threshold", threshold)
-        store.set_setting("musicbrainz_request_interval_seconds", interval)
-        store.set_setting("musicbrainz_fetch_limit", fetch_limit)
-        store.set_setting("musicbrainz_metadata_fetch_limit", metadata_fetch_limit)
-        store.set_setting("default_table_size", table_size)
-        return Redirect("/settings?saved=1", status_code=303)
 
-    @post("/settings/clear-database", sync_to_thread=True)
+        return await to_thread.run_sync(_handle)
+
+    @post("/settings", guards=[_require_editor])
+    async def save_settings(
+        request: Request,
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Validate and persist settings used by subsequent synchronization passes."""
+
+        def _handle() -> Redirect | Response:
+            form = data
+            raw_threshold = _form_string(form, "auto_approve_threshold")
+            raw_interval = _form_string(form, "musicbrainz_request_interval_seconds")
+            raw_fetch_limit = _form_string(form, "musicbrainz_fetch_limit")
+            raw_metadata_fetch_limit = _form_string(
+                form, "musicbrainz_metadata_fetch_limit"
+            )
+            raw_table_size = _form_string(form, "default_table_size")
+            try:
+                threshold = float(raw_threshold)
+                interval = (
+                    float(raw_interval)
+                    if raw_interval
+                    else _get_musicbrainz_request_interval(store)
+                )
+                fetch_limit = (
+                    int(raw_fetch_limit)
+                    if raw_fetch_limit
+                    else _get_musicbrainz_fetch_limit(store)
+                )
+                metadata_fetch_limit = (
+                    int(raw_metadata_fetch_limit)
+                    if raw_metadata_fetch_limit
+                    else _get_musicbrainz_metadata_fetch_limit(store)
+                )
+                table_size = (
+                    int(raw_table_size)
+                    if raw_table_size
+                    else _get_default_table_size(store)
+                )
+                if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+                    raise ValueError
+                if not math.isfinite(interval) or not 1.0 <= interval <= 300:
+                    raise ValueError
+                if not 1 <= fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+                    raise ValueError
+                if not 1 <= metadata_fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+                    raise ValueError
+                if not 1 <= table_size <= MAX_PAGE_SIZE:
+                    raise ValueError
+            except ValueError:
+                return Response(
+                    content=_render_settings_page(
+                        csrf_token=_csrf_token_from(request),
+                        threshold=_get_auto_approve_threshold(
+                            store, auto_approve_threshold
+                        ),
+                        musicbrainz_request_interval=_get_musicbrainz_request_interval(
+                            store
+                        ),
+                        musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
+                        musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
+                            store
+                        ),
+                        default_table_size=_get_default_table_size(store),
+                        environment=environment,
+                        error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000; table size must be 1–200.",
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            store.set_setting("auto_approve_threshold", threshold)
+            store.set_setting("musicbrainz_request_interval_seconds", interval)
+            store.set_setting("musicbrainz_fetch_limit", fetch_limit)
+            store.set_setting("musicbrainz_metadata_fetch_limit", metadata_fetch_limit)
+            store.set_setting("default_table_size", table_size)
+            return Redirect("/settings?saved=1", status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
+    @post("/settings/clear-database", sync_to_thread=True, guards=[_require_editor])
     def clear_database() -> Redirect | Response:
         """Clear synchronized data when this app explicitly runs as development."""
 
@@ -991,6 +1289,11 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await task
 
+    session_config = ServerSideSessionConfig()
+    csrf_config = CSRFConfig(
+        secret=_resolve_csrf_secret(editor_password),
+        header_name=CSRF_HEADER_NAME,
+    )
     return Litestar(
         route_handlers=[
             index,
@@ -1011,6 +1314,26 @@ def create_app(
             save_settings,
             clear_database,
             health,
+            login_page,
+            do_login,
+            logout,
+            create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
+        ],
+        middleware=[session_config.middleware],
+        csrf_config=csrf_config,
+        stores={"sessions": MemoryStore()},
+        exception_handlers={NotAuthorizedException: _handle_not_authorized},
+        response_headers=[
+            ResponseHeader(
+                name="Content-Security-Policy",
+                value=CONTENT_SECURITY_POLICY,
+                documentation_only=False,
+            ),
+            ResponseHeader(name="X-Content-Type-Options", value="nosniff"),
+            ResponseHeader(name="X-Frame-Options", value="DENY"),
+            ResponseHeader(
+                name="Referrer-Policy", value="strict-origin-when-cross-origin"
+            ),
         ],
         lifespan=[periodic_sync_lifespan],
     )
@@ -1098,20 +1421,20 @@ def _event_listing_data(
     """Build the filtered, paginated event listing and its metadata."""
 
     normalized_days = _normalize_recent_days(recent_days)
-    effective_page_size = page_size or _get_default_table_size(store)
-    events = _events_for_tab(
-        list(store.list_events()), tab=tab, recent_days=normalized_days
+    normalized_page_size = _normalize_page_size(
+        page_size or _get_default_table_size(store)
     )
-    filtered_events = _filter_events(events, search)
-    paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
-        filtered_events,
+    paged_events, filtered_count, current_page, total_pages = store.query_events(
+        tab="recent" if tab == "recent" else "upcoming",
+        recent_days=normalized_days,
+        search=search,
         page=page,
-        page_size=effective_page_size,
+        page_size=normalized_page_size,
     )
     event_ids = [event.id for event in paged_events]
     return (
         paged_events,
-        len(filtered_events),
+        filtered_count,
         current_page,
         normalized_page_size,
         total_pages,
@@ -1133,10 +1456,11 @@ def _render_settings_page(
     saved: bool = False,
     cleared: bool = False,
     error: str | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render operational settings with a development-only destructive action."""
 
-    display_version = version or _get_app_version()
+    display_version = version or _cached_app_version()
     notices = ""
     if saved:
         notices += '<p class="notice success">Settings saved.</p>'
@@ -1145,13 +1469,14 @@ def _render_settings_page(
     if error:
         notices += f'<p class="notice error">{escape(error)}</p>'
     reset = (
-        """
+        f"""
         <section class="settings-card danger-zone">
           <p class="section-label">Development tools</p>
           <h2>Clear application data</h2>
           <p>Remove events, venues, suggestions, provenance, logs, and sync state. Your settings remain.</p>
           <form method="post" action="/settings/clear-database"
             onsubmit="return confirm('Clear all development data? This cannot be undone.');">
+            {_csrf_input(csrf_token)}
             <button class="danger-button" type="submit">Clear development database</button>
           </form>
         </section>
@@ -1213,6 +1538,7 @@ def _render_settings_page(
           <h2>Automatic approval</h2>
           <p>New venues bypass editorial review only when one unambiguous suggestion meets this confidence score.</p>
           <form method="post" action="/settings">
+            {_csrf_input(csrf_token)}
             <label for="threshold">Confidence threshold</label>
             <input id="threshold" name="auto_approve_threshold" type="number"
               min="0" max="1" step="0.01" required value="{threshold:g}" />
@@ -1321,64 +1647,6 @@ def _approval_nav() -> str:
     )
 
 
-def _legacy_render_approval_queue(
-    venues: list[VenueRecord],
-    venue_candidate_counts: dict[str, int],
-    artists: list[ArtistRecord],
-    artist_candidate_counts: dict[str, int],
-    *,
-    entity_type: str,
-) -> str:
-    """Render a filterable queue of venues and artists needing review."""
-
-    venue_rows = "".join(
-        "<tr>"
-        '<td><span class="status">Venue</span></td>'
-        f'<td><a href="/approvals/venues/{escape(venue.id)}">{escape(venue.name)}</a></td>'
-        f"<td>{escape(venue.status.value.replace('_', ' ').title())}</td>"
-        f"<td>{venue_candidate_counts.get(venue.id, 0)} "
-        f"{'suggestion' if venue_candidate_counts.get(venue.id, 0) == 1 else 'suggestions'}</td>"
-        "</tr>"
-        for venue in venues
-    )
-    artist_rows = "".join(
-        "<tr>"
-        '<td><span class="status">Artist</span></td>'
-        f'<td><a href="/approvals/artists/{escape(artist.id)}">{escape(artist.name)}</a></td>'
-        f"<td>{escape(artist.status.value.replace('_', ' ').title())}</td>"
-        f"<td>{artist_candidate_counts.get(artist.id, 0)} "
-        f"{'suggestion' if artist_candidate_counts.get(artist.id, 0) == 1 else 'suggestions'}</td>"
-        "</tr>"
-        for artist in artists
-    )
-    rows = (
-        venue_rows
-        if entity_type == "venues"
-        else artist_rows
-        if entity_type == "artists"
-        else venue_rows + artist_rows
-    )
-    empty = '<p class="muted">Nothing is waiting for approval.</p>' if not rows else ""
-    tabs = "".join(
-        f'<a class="tab{" active" if selected else ""}" href="/approvals?entity_type={value}">{label}</a>'
-        for value, label, selected in (
-            ("all", "All", entity_type == "all"),
-            ("venues", "Venues", entity_type == "venues"),
-            ("artists", "Artists", entity_type == "artists"),
-        )
-    )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Awaiting approval · Berlin Events Explorer</title><style>{_approval_styles()}</style></head>
-<body><main><p class="kicker">Editorial queue</p><h1>Awaiting approval</h1>
-<p class="muted">Review suggested metadata before it appears as verified information.</p>
-{_approval_nav()}<nav class="tabs" aria-label="Entity filters">{tabs}</nav>
-<section class="card">{empty}<table><thead><tr><th>Type</th><th>Name</th>
-<th>Status</th><th>Suggestions</th></tr></thead><tbody>{rows}</tbody></table></section>
-</main></body></html>"""
-
-
 def _venue_field(
     name: str, label: str, value: str | None, *, wide: bool = False
 ) -> str:
@@ -1400,6 +1668,7 @@ def _render_venue_approval_form(
     events: list[Event],
     *,
     error: str | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render candidate selection and one approval action for current form values."""
 
@@ -1458,7 +1727,7 @@ def _render_venue_approval_form(
 </section>
 <h2>Suggestions</h2><div class="suggestions">{suggestions}</div>
 <form method="post" action="/approvals/venues/{escape(venue.id)}" class="card">
-{hidden}<div class="form-grid">
+{_csrf_input(csrf_token)}{hidden}<div class="form-grid">
 {_venue_field("name", "Venue name", venue.name, wide=True)}
 {_venue_field("address", "Address", base_address, wide=True)}
 {_venue_field("postal_code", "Postal code", base_postal_code)}
@@ -1470,6 +1739,7 @@ def _render_venue_approval_form(
 <button type="submit" name="action" value="approve">Approve</button>
 </div></form>
 <form method="post" action="/approvals/venues/{escape(venue.id)}/discover" class="actions">
+{_csrf_input(csrf_token)}
 <button type="submit" class="secondary">Find or refresh suggestions</button></form>
 </main></body></html>"""
 
@@ -1480,6 +1750,7 @@ def _render_artist_approval_form(
     *,
     homepage: str | None = None,
     error: str | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render candidate identity evidence and editable artist fields."""
 
@@ -1516,6 +1787,7 @@ def _render_artist_approval_form(
 <p class="kicker">Artist review</p><h1>{escape(artist.name)}</h1>
 <p class="muted">Choose a suggestion if needed, edit the public fields, then approve the changes.</p>{error_html}
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}" class="card">
+{_csrf_input(csrf_token)}
 <h2>Suggestions</h2><div class="suggestions">{options}</div>
 <div class="form-grid">
 <label class="field-wide">Artist name<input type="text" name="name" required value="{escape(artist.name, quote=True)}" /></label>
@@ -1526,6 +1798,7 @@ def _render_artist_approval_form(
 <label class="field-wide">Official homepage<input type="url" name="official_homepage" value="{escape(homepage or "", quote=True)}" /></label>
 </div><div class="actions"><button type="submit">Approve changes</button></div></form>
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}/discover" class="actions">
+{_csrf_input(csrf_token)}
 <button type="submit" class="secondary">Find or refresh suggestions</button></form>
 </main></body></html>"""
 
@@ -1615,400 +1888,6 @@ main {{ max-width:760px; margin:0 auto; padding:2rem 1.25rem 3rem; }} a {{ color
 </section><section><h2>Events</h2><ul>{event_items}</ul></section></main></body></html>"""
 
 
-def _legacy_render_events_page(
-    events: list[Event],
-    *,
-    total_count: int,
-    page: int,
-    page_size: int,
-    total_pages: int,
-    tab: str = "upcoming",
-    recent_days: int = 7,
-    search: str = "",
-    venue_ids_by_event: dict[str, str] | None = None,
-    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
-) -> str:
-    """Render a full HTML page with the provided events."""
-
-    styles = (
-        """ :root {
-        --surface: #ffffff;
-        --surface-soft: #f3f5f9;
-        --text: #0f172a;
-        --muted: #64748b;
-        --primary: #3b82f6;
-        --line: #d5dbe8;
-        --danger: #dc2626;
-        --radius-lg: 0.85rem;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: Inter, "Segoe UI", Roboto, sans-serif;
-        background: linear-gradient(180deg, #f6f7fb 0%, #eef2ff 45%, #f8fafc 100%);
-        color: var(--text);
-      }
-
-      .events-app {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 2rem 1.25rem 3rem;
-      }
-
-      .events-header {
-        margin-bottom: 1rem;
-      }
-
-      .page-kicker {
-        display: inline-block;
-        margin: 0 0 0.3rem;
-        font-size: 0.85rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--primary);
-        font-weight: 650;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: clamp(1.5rem, 2.6vw, 2.15rem);
-        line-height: 1.2;
-      }
-
-      .toolbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-      }
-
-      .toolbar-actions {
-        display: flex;
-        align-items: center;
-        gap: 0.55rem;
-      }
-
-      .settings-link {
-        display: inline-flex;
-        align-items: center;
-        min-height: 2.35rem;
-        padding: 0.45rem 0.75rem;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        color: var(--text);
-        background: var(--surface);
-        text-decoration: none;
-        font-weight: 600;
-      }
-
-      .settings-link:hover {
-        border-color: #93c5fd;
-        background: #eff6ff;
-      }
-
-      .sync-button {
-        border: 1px solid transparent;
-        padding: 0.5rem 1rem;
-        border-radius: var(--radius-lg);
-        background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
-        color: #ffffff;
-        font-weight: 600;
-        cursor: pointer;
-        transition: transform 120ms ease, box-shadow 120ms ease;
-      }
-
-      .sync-button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
-      }
-
-      .sync-button:disabled {
-        filter: grayscale(0.25);
-        cursor: not-allowed;
-        box-shadow: none;
-        transform: none;
-      }
-
-      .sync-error {
-        color: var(--danger);
-        min-height: 1.1rem;
-        font-weight: 500;
-      }
-
-      .sync-progress {
-        display: grid;
-        gap: 0.45rem;
-        margin: 0.75rem 0;
-        color: var(--muted);
-        font-size: 0.92rem;
-      }
-
-      .sync-progress p {
-        margin: 0;
-      }
-
-      .sync-progress progress {
-        width: min(34rem, 100%);
-        height: 0.65rem;
-        accent-color: var(--accent);
-      }
-
-      .tabs {
-        display: flex;
-        gap: 0.35rem;
-        align-items: center;
-        margin: 1.25rem 0 0.75rem;
-        border-bottom: 1px solid var(--line);
-      }
-
-      .tab {
-        color: var(--muted);
-        padding: 0.65rem 0.85rem;
-        text-decoration: none;
-        border-bottom: 3px solid transparent;
-        font-weight: 600;
-      }
-
-      .tab:hover,
-      .tab.active {
-        color: var(--primary);
-        border-bottom-color: var(--primary);
-      }
-
-      .recent-settings {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        margin: 0 0 0.75rem;
-        color: var(--muted);
-        font-size: 0.9rem;
-      }
-
-      .recent-settings select {
-        border: 1px solid var(--line);
-        border-radius: 0.45rem;
-        padding: 0.35rem 0.5rem;
-        background: var(--surface);
-        color: var(--text);
-      }
-
-      #events-panel {
-        margin-top: 0.5rem;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        padding: 0.9rem;
-        box-shadow: 0 16px 40px rgba(15, 23, 42, 0.07);
-      }
-
-      .meta {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin: 0.25rem 0 0.75rem;
-      }
-
-      .pagination {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin: 0.4rem 0 1rem;
-      }
-
-      .pagination-link {
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        color: var(--text);
-        text-decoration: none;
-        padding: 0.35rem 0.85rem;
-        font-size: 0.9rem;
-        background: var(--surface-soft);
-      }
-
-      .pagination-link:hover {
-        background: #dbeafe;
-      }
-
-      .pagination-link.disabled {
-        color: #94a3b8;
-        pointer-events: none;
-        background: #f8fafc;
-      }
-
-      .pagination-page {
-        color: var(--muted);
-        font-size: 0.9rem;
-      }
-
-      .filter-bar {
-        display: flex;
-        align-items: end;
-        justify-content: space-between;
-        gap: 1rem;
-        flex-wrap: wrap;
-        margin: 0 0 0.8rem;
-      }
-
-      .filter-label {
-        display: grid;
-        gap: 0.35rem;
-        color: #334155;
-        font-size: 0.85rem;
-        font-weight: 700;
-        width: min(28rem, 100%);
-      }
-
-      .filter-input {
-        width: 100%;
-        padding: 0.72rem 0.8rem;
-        border: 1px solid #b9c2d0;
-        border-radius: 0.65rem;
-        color: var(--text);
-        background: var(--surface);
-        font: inherit;
-      }
-
-      .filter-input:focus {
-        outline: 3px solid #bfdbfe;
-        outline-offset: 2px;
-      }
-
-      .filter-wrapper {
-        position: relative;
-      }
-
-      .filter-clear {
-        position: absolute;
-        right: 0.5rem;
-        top: 50%;
-        transform: translateY(-50%);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 1.4rem;
-        height: 1.4rem;
-        border: 0;
-        border-radius: 50%;
-        background: #e2e8f0;
-        color: #475569;
-        font-size: 0.95rem;
-        line-height: 1;
-        cursor: pointer;
-        padding: 0;
-      }
-
-      .filter-clear:hover {
-        background: #cbd5e1;
-      }
-
-      .result-count {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin: 0 0 0.2rem;
-      }
-
-"""
-        + _event_table_styles()
-        + """
-
-      @media (max-width: 720px) {
-        .events-app {
-          padding: 1rem 0.75rem 2rem;
-        }
-
-        .toolbar {
-          align-items: stretch;
-        }
-
-      }"""
-    )
-
-    events_html = _render_events_panel(
-        events,
-        total_count=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages,
-        tab=tab,
-        recent_days=recent_days,
-        search=search,
-        venue_ids_by_event=venue_ids_by_event,
-        artist_ids_by_event_performer=artist_ids_by_event_performer,
-    )
-    signals = escape(
-        json.dumps(
-            {
-                "eventCount": total_count,
-                "eventSearch": search,
-                "eventTab": tab,
-                "eventRecentDays": recent_days,
-                "eventPageSize": page_size,
-                "isSyncing": False,
-                "syncError": None,
-            }
-        ),
-        quote=True,
-    )
-
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Berlin Events Explorer</title>
-    <script type="module" src="{DATASTAR_SCRIPT}"></script>
-    <style>
-{styles}
-    </style>
-  </head>
-  <body>
-    <main class="events-app" data-signals='{signals}'>
-      <header class="events-header">
-        <p class="page-kicker">Berlin Events</p>
-        <div class="toolbar">
-          <h1 data-text="'Berlin Events Explorer (' + $eventCount + ')'">Berlin Events Explorer</h1>
-          <div class="toolbar-actions">
-            <button
-              type="button"
-              class="sync-button"
-              data-attr="{{'disabled': $isSyncing}}"
-              data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
-              data-on:click="@post('sync?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">
-              Sync now
-            </button>
-            <a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>
-          </div>
-        </div>
-      </header>
-      <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
-      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>
-      {_render_tabs(tab=tab, recent_days=recent_days, search=search)}
-      <section class="filter-bar" aria-labelledby="event-filter-label">
-        <div class="filter-label" id="event-filter-label">
-          <label for="event-filter">Filter events</label>
-          <div class="filter-wrapper">
-            <input class="filter-input" id="event-filter" type="search" name="search"
-              data-bind="eventSearch"
-              data-on:input__debounce_150ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
-              value="{escape(search, quote=True)}"
-              placeholder="Search by title, venue, or performers" autocomplete="off" />
-            <button class="filter-clear" id="event-filter-clear" type="button"
-              aria-label="Clear filter"
-              data-attr="{{'hidden': $eventSearch.length === 0}}"
-              data-on:click="$eventSearch = ''; history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
-          </div>
-        </div>
-        <p class="result-count" id="event-result-count" aria-live="polite"
-          data-text="$eventCount + ' events'">{total_count} events</p>
-      </section>
-      {events_html}
-    </main>
-  </body>
-</html>
-"""
-
-
 def _render_date_events_page(
     target_date: date,
     events: list[Event],
@@ -2065,160 +1944,6 @@ def _render_date_events_page(
         {event_table}
       </section>
     </main>
-  </body>
-</html>"""
-
-
-def _legacy_render_venues_page(
-    summaries: list[VenueSummary], *, table_size: int = DEFAULT_TABLE_SIZE
-) -> str:
-    """Render the venue catalog and its client-side name filter."""
-
-    total_venues = len(summaries)
-    displayed_summaries = summaries[: max(1, table_size)]
-    rows: list[str] = []
-    for summary in displayed_summaries:
-        venue = summary.venue
-        district = venue.district or "Not listed"
-        search_text = f"{venue.name} {district}".casefold()
-        event_label = "event" if summary.event_count == 1 else "events"
-        rows.append(
-            '<tr class="venue-row" data-venue-row '
-            f'data-venue-href="/venues/{escape(venue.id, quote=True)}" '
-            f'data-venue-search="{escape(search_text, quote=True)}" '
-            'tabindex="0" role="link">'
-            f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">'
-            f"{escape(venue.name)}</a></td>"
-            f'<td data-label="District">{escape(district)}</td>'
-            f'<td data-label="Events">{summary.event_count} {event_label}</td>'
-            "</tr>"
-        )
-    table_rows = "".join(rows)
-    empty_table = (
-        '<p class="empty-state">No venues have been synced yet.</p>'
-        if not summaries
-        else ""
-    )
-    hidden_count = total_venues - len(displayed_summaries)
-    shown_text = (
-        f"Showing {len(displayed_summaries)} of {total_venues} venues"
-        if hidden_count > 0
-        else f"{total_venues} venues"
-    )
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Venues · Berlin Events Explorer</title>
-    <style>
-      :root {{ --surface:#fff; --soft:#f3f5f9; --text:#0f172a; --muted:#64748b;
-        --primary:#2563eb; --line:#d5dbe8; }}
-      * {{ box-sizing:border-box; }}
-      body {{ margin:0; color:var(--text);
-        font-family:Inter,"Segoe UI",Roboto,sans-serif;
-        background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%); }}
-      main {{ max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }}
-      a {{ color:var(--primary); }}
-      .page-kicker {{ margin:0 0 .3rem; color:var(--primary); font-size:.82rem;
-        font-weight:700; letter-spacing:.08em; text-transform:uppercase; }}
-      h1 {{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
-      .intro {{ color:var(--muted); margin:.55rem 0 1.2rem; }}
-      .tabs {{ display:flex; gap:.35rem; align-items:center; margin:1.25rem 0 .75rem;
-        border-bottom:1px solid var(--line); overflow-x:auto; }}
-      .tab {{ color:var(--muted); padding:.65rem .85rem; text-decoration:none;
-        border-bottom:3px solid transparent; font-weight:600; white-space:nowrap; }}
-      .tab:hover,.tab.active {{ color:var(--primary); border-bottom-color:var(--primary); }}
-      .filter-bar {{ display:flex; align-items:end; justify-content:space-between; gap:1rem;
-        flex-wrap:wrap; margin:1.25rem 0 .8rem; }}
-      .filter-label {{ display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
-        width:min(28rem,100%); }}
-      .filter-input {{ width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
-        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }}
-      .filter-input:focus,.venue-row:focus,a:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
-      .result-count {{ color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }}
-      .catalog {{ background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
-        padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }}
-      table {{ width:100%; border-collapse:collapse; font-size:.95rem; }}
-      th,td {{ text-align:left; vertical-align:top; padding:.7rem .55rem; border-bottom:1px solid var(--line); }}
-      th {{ color:#334155; font-weight:650; }}
-      .venue-row {{ cursor:pointer; }}
-      .venue-row:hover td,.venue-row:focus td {{ background:#f8fafc; }}
-      tbody tr:last-child td {{ border-bottom:none; }}
-      .empty-state {{ color:var(--muted); margin:.35rem 0; }}
-      @media (max-width:720px) {{
-        main {{ padding:1rem .75rem 2rem; }}
-        table,thead,tbody,tr,th,td {{ display:block; }}
-        thead {{ display:none; }}
-        tbody tr {{ margin-bottom:.7rem; border:1px solid var(--line); border-radius:.7rem; overflow:hidden; }}
-        tbody tr td {{ padding:.45rem .65rem; border-bottom:1px solid var(--line); }}
-        tbody tr td::before {{ content:attr(data-label); display:block; color:var(--muted);
-          font-size:.78rem; margin-bottom:.2rem; letter-spacing:.04em; text-transform:uppercase; }}
-        tbody tr td:last-child {{ border-bottom:none; }}
-      }}
-    </style>
-  </head>
-  <body>
-    <main>
-      <p class="page-kicker">Berlin Events</p>
-      <h1>Venues</h1>
-      <p class="intro">Browse every venue in the catalog and the events currently associated with it.</p>
-      <nav class="tabs" aria-label="Application views">
-        <a class="tab" href="/?tab=recent">Recently added</a>
-        <a class="tab" href="/?tab=upcoming">Upcoming</a>
-        <a class="tab active" href="/venues" aria-current="page">Venues</a>
-        <a class="tab" href="/approvals">Awaiting approval</a>
-      </nav>
-      <section class="filter-bar" aria-labelledby="venue-filter-label">
-        <label class="filter-label" id="venue-filter-label" for="venue-filter">
-          Filter venues
-          <input class="filter-input" id="venue-filter" type="search"
-            placeholder="Search by venue or district" autocomplete="off" />
-        </label>
-        <p class="result-count" id="venue-result-count" aria-live="polite">{shown_text}</p>
-      </section>
-      <section class="catalog" aria-label="Venue list">
-        {empty_table}
-        <p class="empty-state" id="venue-no-match" hidden>No venues match that filter.</p>
-        <table>
-          <thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead>
-          <tbody>{table_rows}</tbody>
-        </table>
-      </section>
-    </main>
-    <script>
-      (() => {{
-        const input = document.querySelector("#venue-filter");
-        const rows = [...document.querySelectorAll("[data-venue-row]")];
-        const count = document.querySelector("#venue-result-count");
-        const noMatch = document.querySelector("#venue-no-match");
-        const pluralize = (number) => `${{number}} venue${{number === 1 ? "" : "s"}}`;
-        const render = () => {{
-          const query = input.value.trim().toLocaleLowerCase();
-          let visible = 0;
-          for (const row of rows) {{
-            const matches = row.dataset.venueSearch.toLocaleLowerCase().includes(query);
-            row.hidden = !matches;
-            if (matches) visible += 1;
-          }}
-          count.textContent = pluralize(visible);
-          noMatch.hidden = visible !== 0;
-        }};
-        input.addEventListener("input", render);
-        for (const row of rows) {{
-          row.addEventListener("click", (event) => {{
-            if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref);
-          }});
-          row.addEventListener("keydown", (event) => {{
-            if (event.key === "Enter" || event.key === " ") {{
-              event.preventDefault();
-              window.location.assign(row.dataset.venueHref);
-            }}
-          }});
-        }}
-        render();
-      }})();
-    </script>
   </body>
 </html>"""
 
@@ -2377,17 +2102,17 @@ def _perform_sync_stream(
     """Run sync and emit Datastar SSE patch events."""
 
     normalized_days = _normalize_recent_days(recent_days)
-    current_events = _filter_events(
-        _events_for_tab(
-            list(store.list_events()), tab=tab, recent_days=normalized_days
-        ),
-        search,
+    normalized_tab = "recent" if tab == "recent" else "upcoming"
+    _, current_count, _, _ = store.query_events(
+        tab=normalized_tab,
+        recent_days=normalized_days,
+        search=search,
+        page=1,
+        page_size=1,
     )
     yield _sse_event(
         "datastar-patch-signals",
-        _signals_payload(
-            event_count=len(current_events), is_syncing=True, sync_error=None
-        ),
+        _signals_payload(event_count=current_count, is_syncing=True, sync_error=None),
     )
     yield _sse_event(
         "datastar-patch-elements",
@@ -2427,7 +2152,9 @@ def _perform_sync_stream(
         )
     worker.join()
 
-    if isinstance(failure, (SyncError, httpx.RequestError)):
+    if isinstance(failure, SyncInProgressError):
+        sync_error = str(failure)
+    elif isinstance(failure, (SyncError, httpx.RequestError)):
         sync_error = f"Sync failed: {escape(str(failure))}"
         yield _sse_event(
             "datastar-patch-elements",
@@ -2438,21 +2165,18 @@ def _perform_sync_stream(
     else:
         sync_error = None
 
-    synced_events = _filter_events(
-        _events_for_tab(
-            list(store.list_events()), tab=tab, recent_days=normalized_days
-        ),
-        search,
-    )
-    paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
-        synced_events,
+    normalized_page_size = _normalize_page_size(page_size)
+    paged_events, synced_count, current_page, total_pages = store.query_events(
+        tab=normalized_tab,
+        recent_days=normalized_days,
+        search=search,
         page=page,
-        page_size=page_size,
+        page_size=normalized_page_size,
     )
     if view == "events":
         events_panel = _render_events_panel(
             paged_events,
-            total_count=len(synced_events),
+            total_count=synced_count,
             page=current_page,
             page_size=normalized_page_size,
             total_pages=total_pages,
@@ -2483,32 +2207,15 @@ def _perform_sync_stream(
             ),
         )
     elif view == "approvals":
-        pending_venues = [
-            venue
-            for venue in store.list_venues()
-            if venue.status
-            not in {VenueStatus.VERIFIED, VenueStatus.NOT_A_VENUE, VenueStatus.REJECTED}
-        ]
-        pending_artists = [
-            artist
-            for artist in store.list_artists()
-            if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
-        ]
         yield _sse_event(
             "datastar-patch-elements",
             "elements "
             + _render_tab_content_element(
                 _render_approval_content(
-                    pending_venues,
-                    {
-                        venue.id: len(store.list_venue_candidates(venue.id))
-                        for venue in pending_venues
-                    },
-                    pending_artists,
-                    {
-                        artist.id: len(store.list_artist_candidates(artist.id))
-                        for artist in pending_artists
-                    },
+                    store.list_pending_venues(),
+                    store.count_venue_candidates_by_venue(),
+                    store.list_pending_artists(),
+                    store.count_artist_candidates_by_artist(),
                     entity_type="all",
                 )
             ),
@@ -2516,7 +2223,7 @@ def _perform_sync_stream(
     yield _sse_event(
         "datastar-patch-signals",
         _signals_payload(
-            event_count=len(synced_events),
+            event_count=synced_count,
             is_syncing=False,
             sync_error=sync_error,
         ),
@@ -2554,14 +2261,7 @@ def _verified_artist_ids_by_event_performer(
 ) -> dict[tuple[str, int], str]:
     """Return artist links only for identities verified for public display."""
 
-    links = store.get_artist_ids_for_event_performers(event_ids)
-    artists = {artist.id: artist for artist in store.list_artists()}
-    return {
-        key: artist_id
-        for key, artist_id in links.items()
-        if artists.get(artist_id) is not None
-        and artists[artist_id].status is ArtistStatus.VERIFIED
-    }
+    return store.get_artist_ids_for_event_performers(event_ids, only_verified=True)
 
 
 def _paginate_events(
@@ -2954,14 +2654,7 @@ def _render_tabs(*, tab: str, recent_days: int, search: str = "") -> str:
     )
 
 
-def _event_search_text(event: Event) -> str:
-    """Build a case-folded haystack from title, venue, and performers."""
-
-    parts = [event.title]
-    if event.venue is not None:
-        parts.append(event.venue.name)
-    parts.extend(performer.name for performer in event.performers)
-    return " ".join(parts).casefold()
+_event_search_text = event_search_text
 
 
 def _filter_events(events: list[Event], search: str) -> list[Event]:
@@ -3080,6 +2773,12 @@ def _fragment_url(href: str) -> str:
     return f"{href}{separator}fragment=1"
 
 
+def _js_string_escape(value: str) -> str:
+    """Escape a value for embedding inside a single-quoted JS string literal."""
+
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _in_place_navigation_action(
     href: str, *, app_view: str, event_tab: str | None = None
 ) -> str:
@@ -3088,9 +2787,9 @@ def _in_place_navigation_action(
     event_tab_assignment = f" $eventTab = '{event_tab}';" if event_tab else ""
     return (
         "evt.preventDefault(); "
-        f"history.pushState(null, '', '{href}'); "
+        f"history.pushState(null, '', '{_js_string_escape(href)}'); "
         f"$appView = '{app_view}';"
-        f"{event_tab_assignment} @get('{_fragment_url(href)}')"
+        f"{event_tab_assignment} @get('{_js_string_escape(_fragment_url(href))}')"
     )
 
 
@@ -3112,8 +2811,9 @@ def _render_in_place_link(
         event_tab=event_tab,
     )
     return (
-        f'<a class="{class_name}" href="{escape(href, quote=True)}"{current} {attributes}'
-        f'data-on:click="{action}">{label}</a>'
+        f'<a class="{escape(class_name, quote=True)}" '
+        f'href="{escape(href, quote=True)}"{current} {attributes}'
+        f'data-on:click="{escape(action, quote=True)}">{escape(label)}</a>'
     )
 
 
@@ -3194,6 +2894,7 @@ def _render_app_page(
     recent_days: int = 7,
     search: str = "",
     heading: str = "Berlin Events Explorer",
+    csrf_token: str | None = None,
 ) -> str:
     """Render the shared document shell around one tab's content fragment."""
 
@@ -3214,10 +2915,13 @@ def _render_app_page(
     if not isinstance(navigation_page_size, int):
         navigation_page_size = DEFAULT_PAGE_SIZE
     serialized_signals = escape(json.dumps(state), quote=True)
+    sync_options = (
+        f", {{headers: {{'{CSRF_HEADER_NAME}': '{csrf_token}'}}}}" if csrf_token else ""
+    )
     sync_action = (
         "@post('sync?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab "
         "+ '&amp;recent_days=' + $eventRecentDays + '&amp;search=' "
-        "+ encodeURIComponent($eventSearch) + '&amp;view=' + $appView)"
+        f"+ encodeURIComponent($eventSearch) + '&amp;view=' + $appView{sync_options})"
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -3393,6 +3097,7 @@ def _render_events_page_new(
     search: str = "",
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+    csrf_token: str | None = None,
 ) -> str:
     """Render the events page using the shared application shell."""
 
@@ -3423,6 +3128,7 @@ def _render_events_page_new(
             "eventPageSize": page_size,
         },
         heading=f"Berlin Events Explorer ({total_count})",
+        csrf_token=csrf_token,
     )
 
 
@@ -3604,6 +3310,7 @@ def _render_venues_page_new(
     page: int = 1,
     page_size: int | None = None,
     search: str = "",
+    csrf_token: str | None = None,
 ) -> str:
     """Render the venue catalog using the shared application shell."""
 
@@ -3618,6 +3325,7 @@ def _render_venues_page_new(
             search=search,
         ),
         signals={"eventPageSize": normalized_page_size, "venueSearch": search},
+        csrf_token=csrf_token,
     )
 
 
@@ -3677,6 +3385,7 @@ def _render_approval_queue_new(
     artist_candidate_counts: dict[str, int],
     *,
     entity_type: str,
+    csrf_token: str | None = None,
 ) -> str:
     """Render the approval queue using the shared application shell."""
 
@@ -3690,6 +3399,7 @@ def _render_approval_queue_new(
             artist_candidate_counts,
             entity_type=entity_type,
         ),
+        csrf_token=csrf_token,
     )
 
 
@@ -3708,16 +3418,21 @@ def perform_sync(
 ) -> None:
     """Run one synchronization pass for the configured source."""
 
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        with open_sync_cache() as cache:
-            sync_source_and_ingest_venues(
-                MyTrueIntentSource(),
-                store,
-                client,
-                http_cache=cache,
-                auto_approve_threshold=auto_approve_threshold,
-                progress=progress,
-            )
+    if not _SYNC_LOCK.acquire(blocking=False):
+        raise SyncInProgressError("A sync is already in progress.")
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            with open_sync_cache() as cache:
+                sync_source_and_ingest_venues(
+                    MyTrueIntentSource(),
+                    store,
+                    client,
+                    http_cache=cache,
+                    auto_approve_threshold=auto_approve_threshold,
+                    progress=progress,
+                )
+    finally:
+        _SYNC_LOCK.release()
 
 
 def run_server(
