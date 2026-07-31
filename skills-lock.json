@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "skills": {
+    "SQLite Database Expert": {
+      "source": "martinholovsky/claude-skills-generator",
+      "sourceType": "github",
+      "skillPath": "skills/sqlite/SKILL.md",
+      "computedHash": "0e75baa1c3159dba4c6db79330634327039c9813410256b73357dcbb0ed9d0ea"
+    },
+    "datastar": {
+      "source": "maragudk/skills",
+      "sourceType": "github",
+      "skillPath": "datastar/SKILL.md",
+      "computedHash": "7d48128d50a8cf4b574150365d7d0f975d70a31e392766ac8880d2ba786c026c"
+    },
+    "litestar": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar/SKILL.md",
+      "computedHash": "bfe973199f8a2dc3e0197e81bdb141633f86378de00c053c7ca767d0ad840934"
+    },
+    "litestar-ai-serving": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-ai-serving/SKILL.md",
+      "computedHash": "abd6994bfc64c4249ee7d9e972ee4b91869bb2768bf96360fc3e3b75010e7d45"
+    },
+    "litestar-auth-guards": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-auth-guards/SKILL.md",
+      "computedHash": "eab00023960d8d0953953a7f0d8574412221d0e5cd5ff677009e2b14d7070b5c"
+    },
+    "litestar-autowire": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-autowire/SKILL.md",
+      "computedHash": "a92064c5711ffdd0a802e1fb8e095ecff3d8546c0a9f0798d49bed64006d5985"
+    },
+    "litestar-build": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-build/SKILL.md",
+      "computedHash": "a6bf1c11df90efb6fd013ad5477e403a59a6d022c66da34d0aa6aaaf0449c767"
+    },
+    "litestar-data-services": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-data-services/SKILL.md",
+      "computedHash": "1b45536d057313dcbedce5be380894f8fce747f26114d8e528e7f5c466748e09"
+    },
+    "litestar-deployment": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-deployment/SKILL.md",
+      "computedHash": "39d1767403f9fcdf2929dfcb255aad786516023c7a915895cec9d920f130013d"
+    },
+    "litestar-di": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-di/SKILL.md",
+      "computedHash": "b348c1ecd35f404fb4dcac2e1f11f3faa7b1193a1bb629a69989818343ef4791"
+    },
+    "litestar-dto-openapi": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-dto-openapi/SKILL.md",
+      "computedHash": "78dc159d9d9300b2477d5c0c11d424ff54e8dbae2d0fb112efb7d45b8295ad7a"
+    },
+    "litestar-email": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-email/SKILL.md",
+      "computedHash": "3acd87c93ad0e00e976ee271eec73c9543277abfd5b32202ac24f91d3d6269e9"
+    },
+    "litestar-exceptions": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-exceptions/SKILL.md",
+      "computedHash": "60f5ddf6021ebebb0425b4fce271c105b62c7cb3f5e4a5048c29ebb5d657d44d"
+    },
+    "litestar-granian": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-granian/SKILL.md",
+      "computedHash": "9bc76222a65af9cc61aed50f061d517b32167c3236b1a7e355da062bc3ce9ef1"
+    },
+    "litestar-htmx": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-htmx/SKILL.md",
+      "computedHash": "e155f2d6dd521d6bf995d82dc6eff21b0b0c692173ef526323ceb1002dea24b0"
+    },
+    "litestar-inertia": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-inertia/SKILL.md",
+      "computedHash": "87f4ed2f1b2c0407347f906cfbab97aebf22cf89930026edce6ed1de0c999560"
+    },
+    "litestar-mcp": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-mcp/SKILL.md",
+      "computedHash": "aee3e0140391d34905b53ea2f47d837062d4f8b547a92f64df81b55f5cd0bfff"
+    },
+    "litestar-middleware": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-middleware/SKILL.md",
+      "computedHash": "61d39abc20af350db5db52445c343e3779dc2393fa11a066ec49490cb8144d85"
+    },
+    "litestar-plugins": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-plugins/SKILL.md",
+      "computedHash": "2798587c1ad891f02c156dcfe90aa4ea35349b6c6b4ff760e2e74a84a778d1f1"
+    },
+    "litestar-queues": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-queues/SKILL.md",
+      "computedHash": "19ef0a122d4e3f8b83fe342ba2f2f214615d7dc1ed86da146fe6362470f53ecb"
+    },
+    "litestar-realtime": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-realtime/SKILL.md",
+      "computedHash": "c7551d72b46297c9f59401ca5fdcf08a006a27fd4790ee2478f4c2751b8bf314"
+    },
+    "litestar-routing": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-routing/SKILL.md",
+      "computedHash": "a1ea33963f4a955c9913c35a6e9f71e59e0ba334f80a79b13b5e876b59ed9113"
+    },
+    "litestar-saq": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-saq/SKILL.md",
+      "computedHash": "e768e98f893d8c1eae63ce28c1505ad95a7971e79c1e56ea13587303f9f488e9"
+    },
+    "litestar-settings": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-settings/SKILL.md",
+      "computedHash": "0892c78c6be92bd5dc5ae5e25a5f191da5c4710c521f9d0467adb905adeae573"
+    },
+    "litestar-styleguide": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-styleguide/SKILL.md",
+      "computedHash": "77ccbaded17028fb645c9fda081c84df1bc5bc7c286af2265a5bf14fe9397fa1"
+    },
+    "litestar-testing": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-testing/SKILL.md",
+      "computedHash": "26e67f240363fde6d6b6a898bea699a2ca18b416bf64ff043221af2a694c5e50"
+    },
+    "litestar-vite": {
+      "source": "litestar-org/litestar-skills",
+      "sourceType": "github",
+      "skillPath": "skills/litestar-vite/SKILL.md",
+      "computedHash": "42be081831f0445340354e60a1c34efa356d4c50a665ca6a87ac874b81ea431a"
+    }
+  }
+}
