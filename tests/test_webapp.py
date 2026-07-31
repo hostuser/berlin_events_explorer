@@ -26,6 +26,7 @@ from berlin_events_explorer.webapp import (
     _recent_events,
     _periodic_sync,
     _render_events_panel,
+    _render_venues_page,
     _upcoming_events,
     _sse_event,
     _sorted_events,
@@ -579,6 +580,80 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
     assert 'href="https://example.club/"' in detail_response.text
     assert 'rel="noopener noreferrer"' in detail_response.text
     assert 'class="venue-map"' not in detail_response.text
+
+
+def test_venues_page_lists_districts_event_counts_and_case_insensitive_filter(
+    tmp_path,
+) -> None:
+    """The venue catalog exposes summaries and progressive filter behavior."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    first_event = _seed_event()
+    second_event = first_event.model_copy(
+        update={
+            "id": "evt-2",
+            "title": "Second Signal",
+            "venue": Venue(name="Example Club"),
+        }
+    )
+    third_event = first_event.model_copy(
+        update={
+            "id": "evt-3",
+            "title": "Third Signal",
+            "venue": Venue(name="Lido"),
+        }
+    )
+    store.upsert(first_event)
+    store.upsert(second_event)
+    store.upsert(third_event)
+    store.upsert_venue(
+        VenueRecord(
+            id="example-club",
+            name="Example Club",
+            normalized_name="example club",
+            district="Kreuzberg",
+        )
+    )
+    store.upsert_venue(
+        VenueRecord(
+            id="lido",
+            name="Lido",
+            normalized_name="lido",
+            district="Friedrichshain",
+        )
+    )
+    store.upsert_venue(
+        VenueRecord(
+            id="tba",
+            name="TBA",
+            normalized_name="tba",
+            status=VenueStatus.NOT_A_VENUE,
+        )
+    )
+    store.link_event_venue(first_event.id, "example-club", source_name="Example Club")
+    store.link_event_venue(second_event.id, "example-club", source_name="Example Club")
+    store.link_event_venue(third_event.id, "lido", source_name="Lido")
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/venues")
+
+    assert response.status_code == 200
+    assert "Venues" in response.text
+    assert "Kreuzberg" in response.text
+    assert "Friedrichshain" in response.text
+    assert 'data-label="Events">2 events</td>' in response.text
+    assert 'data-label="Events">1 event</td>' in response.text
+    assert "TBA" not in response.text
+    assert 'data-venue-href="/venues/example-club"' in response.text
+    assert 'href="/venues/lido"' in response.text
+    assert 'id="venue-filter"' in response.text
+    assert "data-venue-row" in response.text
+    assert "toLocaleLowerCase()" in response.text
+    assert ".includes(query)" in response.text
+
+    rendered_empty = _render_venues_page([])
+    assert "No venues have been synced yet." in rendered_empty
 
 
 def test_venue_detail_embeds_openstreetmap_when_coordinates_are_available(

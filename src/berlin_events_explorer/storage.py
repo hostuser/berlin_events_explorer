@@ -64,6 +64,7 @@ venues_table = Table(
     Column("normalized_name", String(500), nullable=False, index=True),
     Column("city", String(100)),
     Column("country", String(10)),
+    Column("district", String(200)),
     Column("address", Text),
     Column("postal_code", String(30)),
     Column("latitude", String(30)),
@@ -112,6 +113,7 @@ venue_candidates_table = Table(
     Column("display_name", Text, nullable=False),
     Column("address", Text),
     Column("postal_code", String(30)),
+    Column("district", String(200)),
     Column("website", Text),
     Column("latitude", String(30)),
     Column("longitude", String(30)),
@@ -301,6 +303,14 @@ class WorkerRun:
     status: str
     error: str | None
     summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class VenueSummary:
+    """A canonical venue together with its number of associated events."""
+
+    venue: VenueRecord
+    event_count: int
 
 
 @dataclass(frozen=True)
@@ -1004,9 +1014,34 @@ class EventStore:
 
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(venues_table).order_by(venues_table.c.name)
+                venues_table.select().order_by(venues_table.c.name)
             )
             return [_venue_from_row(row) for row in rows.mappings()]
+
+    def list_venue_summaries(self) -> list[VenueSummary]:
+        """Return public venues ordered by name with associated event counts."""
+
+        query = (
+            select(
+                venues_table,
+                func.count(event_venues_table.c.event_id).label("event_count"),
+            )
+            .outerjoin(
+                event_venues_table,
+                event_venues_table.c.venue_id == venues_table.c.id,
+            )
+            .where(venues_table.c.status != VenueStatus.NOT_A_VENUE.value)
+            .group_by(venues_table.c.id)
+            .order_by(venues_table.c.name)
+        )
+        with self.engine.connect() as connection:
+            return [
+                VenueSummary(
+                    venue=_venue_from_row(row),
+                    event_count=int(row["event_count"]),
+                )
+                for row in connection.execute(query).mappings()
+            ]
 
     def save_venue_metadata(
         self,
@@ -1141,6 +1176,7 @@ class EventStore:
                     update={
                         "address": candidate.address,
                         "postal_code": candidate.postal_code,
+                        "district": candidate.district,
                         "website": candidate.website,
                         "latitude": candidate.latitude,
                         "longitude": candidate.longitude,

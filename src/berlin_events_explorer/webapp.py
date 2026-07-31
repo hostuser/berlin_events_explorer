@@ -48,7 +48,7 @@ from berlin_events_explorer.models import (
     VenueStatus,
 )
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
-from berlin_events_explorer.storage import EventStore
+from berlin_events_explorer.storage import EventStore, VenueSummary
 from berlin_events_explorer.sync import SyncError, open_sync_cache
 from berlin_events_explorer.venue_enrichment import (
     DEFAULT_AUTO_APPROVE_THRESHOLD,
@@ -84,7 +84,7 @@ def _run_git(*args: str) -> str | None:
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except OSError, subprocess.CalledProcessError:
         return None
     return result.stdout.strip() or None
 
@@ -174,6 +174,7 @@ def _approve_edited_venue(
             update={
                 "address": candidate.address,
                 "postal_code": candidate.postal_code,
+                "district": candidate.district,
                 "website": candidate.website,
                 "latitude": candidate.latitude,
                 "longitude": candidate.longitude,
@@ -195,6 +196,7 @@ def _approve_edited_venue(
             "normalized_name": normalize_venue_name(name),
             "address": _form_string(form, "address") or None,
             "postal_code": _form_string(form, "postal_code") or None,
+            "district": _form_string(form, "district") or None,
             "city": _form_string(form, "city") or None,
             "country": _form_string(form, "country") or None,
             "website": _form_string(form, "website") or None,
@@ -304,6 +306,15 @@ def create_app(
             artist_ids_by_event_performer=artist_ids_by_event_performer,
         )
         return Response(content=html, media_type="text/html")
+
+    @get("/venues", sync_to_thread=True)
+    def venues() -> Response:
+        """Render the public venue catalog with event counts."""
+
+        return Response(
+            content=_render_venues_page(store.list_venue_summaries()),
+            media_type="text/html",
+        )
 
     @get("/venues/{venue_id:str}", sync_to_thread=True)
     def venue_detail(venue_id: str) -> Response:
@@ -667,6 +678,7 @@ def create_app(
     return Litestar(
         route_handlers=[
             index,
+            venues,
             venue_detail,
             artist_detail,
             approvals,
@@ -875,6 +887,7 @@ def _approval_nav() -> str:
         '<nav class="tabs" aria-label="Application views">'
         '<a class="tab" href="/?tab=recent">Recently added</a>'
         '<a class="tab" href="/?tab=upcoming">Upcoming</a>'
+        '<a class="tab" href="/venues">Venues</a>'
         '<a class="tab active" href="/approvals">Awaiting approval</a>'
         "</nav>"
     )
@@ -975,6 +988,7 @@ def _render_venue_approval_form(
 
     base_address = selected.address if selected else venue.address
     base_postal_code = selected.postal_code if selected else venue.postal_code
+    base_district = selected.district if selected else venue.district
     base_website = selected.website if selected else venue.website
     hidden = (
         f'<input type="hidden" name="provider" value="{escape(selected.provider, quote=True)}" />'
@@ -998,6 +1012,7 @@ def _render_venue_approval_form(
 {_venue_field("name", "Venue name", venue.name, wide=True)}
 {_venue_field("address", "Address", base_address, wide=True)}
 {_venue_field("postal_code", "Postal code", base_postal_code)}
+{_venue_field("district", "District", base_district)}
 {_venue_field("city", "City", venue.city)}
 {_venue_field("country", "Country code", venue.country)}
 {_venue_field("website", "Homepage", base_website, wide=True)}
@@ -1442,6 +1457,150 @@ def render_events_page(
 """
 
 
+def _render_venues_page(summaries: list[VenueSummary]) -> str:
+    """Render the venue catalog and its client-side name filter."""
+
+    rows: list[str] = []
+    for summary in summaries:
+        venue = summary.venue
+        district = venue.district or "Not listed"
+        search_text = f"{venue.name} {district}".casefold()
+        event_label = "event" if summary.event_count == 1 else "events"
+        rows.append(
+            '<tr class="venue-row" data-venue-row '
+            f'data-venue-href="/venues/{escape(venue.id, quote=True)}" '
+            f'data-venue-search="{escape(search_text, quote=True)}" '
+            'tabindex="0" role="link">'
+            f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">'
+            f"{escape(venue.name)}</a></td>"
+            f'<td data-label="District">{escape(district)}</td>'
+            f'<td data-label="Events">{summary.event_count} {event_label}</td>'
+            "</tr>"
+        )
+    table_rows = "".join(rows)
+    empty_table = (
+        '<p class="empty-state">No venues have been synced yet.</p>'
+        if not summaries
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Venues · Berlin Events Explorer</title>
+    <style>
+      :root {{ --surface:#fff; --soft:#f3f5f9; --text:#0f172a; --muted:#64748b;
+        --primary:#2563eb; --line:#d5dbe8; }}
+      * {{ box-sizing:border-box; }}
+      body {{ margin:0; color:var(--text);
+        font-family:Inter,"Segoe UI",Roboto,sans-serif;
+        background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%); }}
+      main {{ max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }}
+      a {{ color:var(--primary); }}
+      .page-kicker {{ margin:0 0 .3rem; color:var(--primary); font-size:.82rem;
+        font-weight:700; letter-spacing:.08em; text-transform:uppercase; }}
+      h1 {{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
+      .intro {{ color:var(--muted); margin:.55rem 0 1.2rem; }}
+      .tabs {{ display:flex; gap:.35rem; align-items:center; margin:1.25rem 0 .75rem;
+        border-bottom:1px solid var(--line); overflow-x:auto; }}
+      .tab {{ color:var(--muted); padding:.65rem .85rem; text-decoration:none;
+        border-bottom:3px solid transparent; font-weight:600; white-space:nowrap; }}
+      .tab:hover,.tab.active {{ color:var(--primary); border-bottom-color:var(--primary); }}
+      .filter-bar {{ display:flex; align-items:end; justify-content:space-between; gap:1rem;
+        flex-wrap:wrap; margin:1.25rem 0 .8rem; }}
+      .filter-label {{ display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
+        width:min(28rem,100%); }}
+      .filter-input {{ width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
+        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }}
+      .filter-input:focus,.venue-row:focus,a:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
+      .result-count {{ color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }}
+      .catalog {{ background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
+        padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }}
+      table {{ width:100%; border-collapse:collapse; font-size:.95rem; }}
+      th,td {{ text-align:left; vertical-align:top; padding:.7rem .55rem; border-bottom:1px solid var(--line); }}
+      th {{ color:#334155; font-weight:650; }}
+      .venue-row {{ cursor:pointer; }}
+      .venue-row:hover td,.venue-row:focus td {{ background:#f8fafc; }}
+      tbody tr:last-child td {{ border-bottom:none; }}
+      .empty-state {{ color:var(--muted); margin:.35rem 0; }}
+      @media (max-width:720px) {{
+        main {{ padding:1rem .75rem 2rem; }}
+        table,thead,tbody,tr,th,td {{ display:block; }}
+        thead {{ display:none; }}
+        tbody tr {{ margin-bottom:.7rem; border:1px solid var(--line); border-radius:.7rem; overflow:hidden; }}
+        tbody tr td {{ padding:.45rem .65rem; border-bottom:1px solid var(--line); }}
+        tbody tr td::before {{ content:attr(data-label); display:block; color:var(--muted);
+          font-size:.78rem; margin-bottom:.2rem; letter-spacing:.04em; text-transform:uppercase; }}
+        tbody tr td:last-child {{ border-bottom:none; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="page-kicker">Berlin Events</p>
+      <h1>Venues</h1>
+      <p class="intro">Browse every venue in the catalog and the events currently associated with it.</p>
+      <nav class="tabs" aria-label="Application views">
+        <a class="tab" href="/?tab=recent">Recently added</a>
+        <a class="tab" href="/?tab=upcoming">Upcoming</a>
+        <a class="tab active" href="/venues" aria-current="page">Venues</a>
+        <a class="tab" href="/approvals">Awaiting approval</a>
+      </nav>
+      <section class="filter-bar" aria-labelledby="venue-filter-label">
+        <label class="filter-label" id="venue-filter-label" for="venue-filter">
+          Filter venues
+          <input class="filter-input" id="venue-filter" type="search"
+            placeholder="Search by venue or district" autocomplete="off" />
+        </label>
+        <p class="result-count" id="venue-result-count" aria-live="polite">{len(summaries)} venues</p>
+      </section>
+      <section class="catalog" aria-label="Venue list">
+        {empty_table}
+        <p class="empty-state" id="venue-no-match" hidden>No venues match that filter.</p>
+        <table>
+          <thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead>
+          <tbody>{table_rows}</tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      (() => {{
+        const input = document.querySelector("#venue-filter");
+        const rows = [...document.querySelectorAll("[data-venue-row]")];
+        const count = document.querySelector("#venue-result-count");
+        const noMatch = document.querySelector("#venue-no-match");
+        const pluralize = (number) => `${{number}} venue${{number === 1 ? "" : "s"}}`;
+        const render = () => {{
+          const query = input.value.trim().toLocaleLowerCase();
+          let visible = 0;
+          for (const row of rows) {{
+            const matches = row.dataset.venueSearch.toLocaleLowerCase().includes(query);
+            row.hidden = !matches;
+            if (matches) visible += 1;
+          }}
+          count.textContent = pluralize(visible);
+          noMatch.hidden = visible !== 0;
+        }};
+        input.addEventListener("input", render);
+        for (const row of rows) {{
+          row.addEventListener("click", (event) => {{
+            if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref);
+          }});
+          row.addEventListener("keydown", (event) => {{
+            if (event.key === "Enter" || event.key === " ") {{
+              event.preventDefault();
+              window.location.assign(row.dataset.venueHref);
+            }}
+          }});
+        }}
+        render();
+      }})();
+    </script>
+  </body>
+</html>"""
+
+
 def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
     """Render a public venue page without exposing unverified candidates."""
 
@@ -1516,13 +1675,14 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
   </head>
   <body>
     <main>
-      <p><a href="/">← Back to events</a></p>
+      <p><a href="/venues">← Back to venues</a></p>
       <section class="card">
         <p>Berlin venue</p>
         <h1>{escape(venue.name)}</h1>
         {status_note}
         <dl>
           <dt>Address</dt><dd><address>{address}</address></dd>
+          <dt>District</dt><dd>{escape(venue.district or "Not listed")}</dd>
           <dt>Homepage</dt><dd>{website}</dd>
         </dl>
         {map_html}
@@ -1914,6 +2074,7 @@ def _render_tabs(*, tab: str, recent_days: int) -> str:
         '<nav class="tabs" aria-label="Event views">'
         f'<a class="tab {recent_active}" href="?tab=recent&recent_days={recent_days}">Recently added</a>'
         f'<a class="tab {upcoming_active}" href="?tab=upcoming&recent_days={recent_days}">Upcoming</a>'
+        '<a class="tab" href="/venues">Venues</a>'
         '<a class="tab" href="/approvals">Awaiting approval</a>'
         "</nav>"
         f"{settings}"

@@ -178,6 +178,7 @@ def _candidate_from_payload(
         display_name=str(display_name),
         address=address,
         postal_code=_string_or_none(address_data.get("postcode")),
+        district=_district_from_address(address_data),
         website=website,
         latitude=latitude,
         longitude=longitude,
@@ -204,6 +205,19 @@ def _format_address(address: dict[str, Any]) -> str | None:
     city_line = " ".join(part for part in (postal_code, locality) if part)
     parts = [part for part in (street, city_line) if part]
     return ", ".join(parts) or None
+
+
+def _district_from_address(address: dict[str, Any]) -> str | None:
+    """Return the most specific district-like locality from Nominatim data."""
+
+    return next(
+        (
+            value.strip()
+            for key in ("city_district", "borough", "suburb")
+            if isinstance(value := address.get(key), str) and value.strip()
+        ),
+        None,
+    )
 
 
 def _safe_website(value: object) -> str | None:

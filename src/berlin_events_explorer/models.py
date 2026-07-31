@@ -108,6 +108,7 @@ class VenueRecord(BaseModel):
     normalized_name: str
     city: str | None = "Berlin"
     country: str | None = "DE"
+    district: str | None = None
     address: str | None = None
     postal_code: str | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
@@ -251,6 +252,7 @@ class VenueCandidate(BaseModel):
     display_name: str
     address: str | None = None
     postal_code: str | None = None
+    district: str | None = None
     website: str | None = None
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
