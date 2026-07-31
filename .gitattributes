@@ -1,0 +1,2 @@
+# Atlas verifies migration-file checksums; preserve their committed LF line endings on all platforms.
+src/berlin_events_explorer/db_migrations/** text eol=lf
