@@ -758,10 +758,9 @@ def test_venue_approval_form_offers_suggestion_and_editable_fields(tmp_path) -> 
     assert "Upcoming events (1)" in response.text
     assert "Future Signal" in response.text
     assert "Past Signal" not in response.text
-    assert "max-height:23rem" in response.text
-    assert "overflow:auto" in response.text
-    assert "padding:0 1rem 1rem" in response.text
-    assert "position:sticky" in response.text
+    # The scroll constraint and sticky header live in the stylesheet's
+    # .events-card rules; the page opts in via the class.
+    assert 'class="card events-card"' in response.text
     assert "Suggested Street 1, 10115 Berlin" in response.text
     assert 'name="address" value="Suggested Street 1, 10115 Berlin"' in response.text
     assert 'name="website" value="https://suggested.example/"' in response.text

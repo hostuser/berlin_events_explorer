@@ -198,29 +198,9 @@ def _render_login_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Editor login · Berlin Events Explorer</title>
-    <style>
-      :root {{ --ink:#111827; --muted:#64748b; --line:#dbe1ea; --paper:#f6f7fb;
-        --card:#fff; --blue:#1d4ed8; --danger:#b42318; }}
-      * {{ box-sizing:border-box; }}
-      body {{ margin:0; color:var(--ink); background:var(--paper);
-        font-family:Inter,"Segoe UI",sans-serif; }}
-      main {{ width:min(26rem,calc(100% - 2rem)); margin:14vh auto 0; }}
-      .card {{ padding:1.5rem; border:1px solid var(--line); border-radius:1rem;
-        background:var(--card); box-shadow:0 18px 50px rgba(15,23,42,.06); }}
-      h1 {{ margin:0 0 .3rem; font-size:1.4rem; }}
-      p {{ color:var(--muted); }}
-      label {{ display:block; margin-top:1rem; font-weight:700; }}
-      input {{ display:block; width:100%; margin:.4rem 0 .3rem; padding:.72rem .8rem;
-        border:1px solid #b9c2d0; border-radius:.65rem; font:inherit; }}
-      button {{ margin-top:.9rem; padding:.72rem 1rem; border:0; border-radius:.65rem;
-        background:var(--blue); color:#fff; font:inherit; font-weight:750; cursor:pointer; }}
-      input:focus,a:focus,button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
-      .notice.error {{ padding:.8rem 1rem; border-radius:.7rem; font-weight:650;
-        color:var(--danger); background:#fee4e2; }}
-      .back-link {{ display:inline-block; margin-top:1rem; color:var(--blue); }}
-    </style>
+    {theme.stylesheet_link()}
   </head>
-  <body>
+  <body class="login-page">
     <main>
       <section class="card">
         <h1>Editor login</h1>
@@ -1506,42 +1486,9 @@ def _render_settings_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Settings · Berlin Events Explorer</title>
-    <style>
-      :root {{ --ink:#111827; --muted:#64748b; --line:#dbe1ea; --paper:#f6f7fb;
-        --card:#fff; --blue:#1d4ed8; --danger:#b42318; --danger-soft:#fff1f0; }}
-      * {{ box-sizing:border-box; }}
-      body {{ margin:0; color:var(--ink); background:var(--paper);
-        font-family:Inter,"Segoe UI",sans-serif; }}
-      main {{ width:min(760px,calc(100% - 2rem)); margin:0 auto; padding:2rem 0 4rem; }}
-      a {{ color:var(--blue); }}
-      .settings-header {{ display:flex; justify-content:space-between; align-items:flex-start;
-        gap:1rem; margin-bottom:1.5rem; }}
-      .kicker,.section-label {{ margin:0 0 .35rem; color:var(--muted); font-size:.76rem;
-        font-weight:750; letter-spacing:.09em; text-transform:uppercase; }}
-      h1 {{ margin:0; font-size:clamp(2rem,6vw,3.2rem); letter-spacing:-.045em; }}
-      h2 {{ margin:.1rem 0 .55rem; font-size:1.25rem; }}
-      .back-link {{ white-space:nowrap; margin-top:.4rem; }}
-      .settings-stack {{ display:grid; gap:1rem; }}
-      .settings-card {{ padding:1.25rem; border:1px solid var(--line); border-radius:1rem;
-        background:var(--card); box-shadow:0 18px 50px rgba(15,23,42,.06); }}
-      label {{ display:block; margin-top:1rem; font-weight:700; }}
-      input {{ display:block; width:min(14rem,100%); margin:.4rem 0 .3rem; padding:.72rem .8rem;
-        border:1px solid #b9c2d0; border-radius:.65rem; font:inherit; }}
-      .hint,.settings-card p {{ color:var(--muted); line-height:1.55; }}
-      button {{ margin-top:.8rem; padding:.72rem 1rem; border:0; border-radius:.65rem;
-        background:var(--blue); color:#fff; font:inherit; font-weight:750; cursor:pointer; }}
-      input:focus,a:focus,button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
-      .notice {{ padding:.8rem 1rem; border-radius:.7rem; font-weight:650; }}
-      .notice.success {{ color:#05603a; background:#dcfce7; }}
-      .notice.error {{ color:var(--danger); background:#fee4e2; }}
-      .danger-zone {{ border-color:#f4b8b3; background:var(--danger-soft); }}
-      .danger-zone .section-label,.danger-zone h2 {{ color:var(--danger); }}
-      .danger-button {{ background:var(--danger); }}
-      @media (max-width:560px) {{ .settings-header {{ display:block; }}
-        .back-link {{ display:inline-block; margin-top:1rem; }} }}
-    </style>
+    {theme.stylesheet_link()}
   </head>
-  <body>
+  <body class="settings-page">
     <main>
       <header class="settings-header">
         <div><p class="kicker">Application controls</p><h1>Settings</h1></div>
@@ -1588,66 +1535,6 @@ def _render_settings_page(
     </main>
   </body>
 </html>"""
-
-
-def _approval_styles() -> str:
-    """Return shared styles for the editorial approval workflow."""
-
-    return """
-      :root { --surface:#fff; --soft:#f3f5f9; --text:#0f172a; --muted:#64748b;
-        --primary:#2563eb; --line:#d5dbe8; --success:#047857; --danger:#b91c1c; }
-      * { box-sizing: border-box; }
-      body { margin:0; font-family:Inter,"Segoe UI",sans-serif; color:var(--text);
-        background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%); }
-      main { max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }
-      a { color:var(--primary); }
-      .kicker { color:var(--primary); text-transform:uppercase; letter-spacing:.08em;
-        font-size:.82rem; font-weight:700; }
-      h1 { margin:.2rem 0 .5rem; }
-      .muted { color:var(--muted); }
-      .tabs { display:flex; gap:.35rem; margin:1.25rem 0; border-bottom:1px solid var(--line); }
-      .tab { color:var(--muted); padding:.65rem .85rem; text-decoration:none;
-        border-bottom:3px solid transparent; font-weight:600; }
-      .tab:hover,.tab.active { color:var(--primary); border-bottom-color:var(--primary); }
-      .card { background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
-        padding:1rem; box-shadow:0 16px 40px rgba(15,23,42,.06); }
-      table { width:100%; border-collapse:collapse; }
-      th,td { text-align:left; padding:.7rem .55rem; border-bottom:1px solid var(--line); }
-      th { color:#334155; font-size:.86rem; }
-      .status { display:inline-block; padding:.18rem .55rem; border-radius:999px;
-        background:#e0e7ff; color:#3730a3; font-size:.78rem; }
-      .suggestions { display:grid; gap:.7rem; margin:1rem 0; }
-      .suggestion { display:block; border:1px solid var(--line); border-radius:.7rem;
-        padding:.85rem; text-decoration:none; color:var(--text); background:var(--surface); }
-      .suggestion.selected { border-color:var(--primary); box-shadow:0 0 0 2px #bfdbfe; }
-      .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.85rem; }
-      .field-wide { grid-column:1 / -1; }
-      label { display:block; color:#334155; font-size:.85rem; font-weight:650; }
-      input { width:100%; margin-top:.3rem; padding:.65rem .7rem; border:1px solid var(--line);
-        border-radius:.55rem; color:var(--text); background:#fff; }
-      input:focus,a:focus,button:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
-      .actions { display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1rem; }
-      button,.button { border:0; border-radius:.6rem; padding:.65rem .95rem; font-weight:700;
-        cursor:pointer; background:var(--primary); color:#fff; }
-      .button { display:inline-block; text-decoration:none; }
-      button.secondary,.button.secondary { background:#e2e8f0; color:#0f172a; }
-      .error { color:var(--danger); background:#fee2e2; border-radius:.55rem; padding:.7rem; }
-      .events-section { margin-top:1.5rem; }
-      .events-card { max-height:23rem; overflow:auto; padding:0 1rem 1rem; }
-      .events-card .event-table { display:table; }
-      .events-card .event-table thead { display:table-header-group; position:sticky; top:0;
-        z-index:1; background:var(--surface); }
-      .events-card .event-table tbody { display:table-row-group; }
-      .events-card .event-table tr { display:table-row; }
-      .events-card .event-table th,
-      .events-card .event-table td { display:table-cell; }
-      .events-card .event-table tbody tr td::before { content:none; display:none; }
-      {_event_table_styles()}
-      @media (max-width:720px) { .form-grid { grid-template-columns:1fr; }
-        .field-wide { grid-column:auto; } main { padding:1rem .75rem 2rem; }
-        table,thead,tbody,tr,th,td { display:block; } thead { display:none; }
-        tr { border-bottom:1px solid var(--line); padding:.5rem 0; } td { border:0; } }
-    """
 
 
 def _approval_nav() -> str:
@@ -1734,7 +1621,7 @@ def _render_venue_approval_form(
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Approve {escape(venue.name)} · Berlin Events Explorer</title>
-<style>{_approval_styles()}</style></head><body><main>
+{theme.stylesheet_link()}</head><body class="approval-page"><main>
 <p><a href="{back_href}">← {back_label}</a></p><p class="kicker">Venue approval</p>
 <h1>{escape(venue.name)}</h1><p class="muted">Choose a suggestion or enter the venue details manually, then review and approve the form.</p>
 {error_html}<section class="events-section" aria-labelledby="venue-events-heading">
@@ -1798,8 +1685,8 @@ def _render_artist_approval_form(
     )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Review {escape(artist.name)} · Berlin Events Explorer</title><style>{_approval_styles()}</style></head>
-<body><main><p><a href="{back_href}">← {back_label}</a></p>
+<title>Review {escape(artist.name)} · Berlin Events Explorer</title>{theme.stylesheet_link()}</head>
+<body class="approval-page"><main><p><a href="{back_href}">← {back_label}</a></p>
 <p class="kicker">Artist review</p><h1>{escape(artist.name)}</h1>
 <p class="muted">Choose a suggestion if needed, edit the public fields, then approve the changes.</p>{error_html}
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}" class="card">
@@ -1881,21 +1768,8 @@ def _render_artist_detail_page(
     )
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{escape(artist.name)} · Berlin Events Explorer</title><style>
-body {{ margin:0; font-family:Inter,"Segoe UI",sans-serif; background:#f6f7fb; color:#0f172a; }}
-main {{ max-width:760px; margin:0 auto; padding:2rem 1.25rem 3rem; }} a {{ color:#1d4ed8; }}
-.card {{ background:#fff; border:1px solid #d5dbe8; border-radius:.85rem; padding:1.25rem; }}
-.detail-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }}
-.detail-header h1 {{ margin:.2rem 0 0; }}
-.detail-actions {{ display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1.25rem; }}
-.action-button {{ display:inline-flex; align-items:center; justify-content:center; min-height:2.4rem;
-  padding:.6rem .9rem; border:1px solid #1d4ed8; border-radius:.6rem; background:#1d4ed8;
-  color:#fff; font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }}
-.action-button.secondary {{ border-color:#cbd5e1; background:#e2e8f0; color:#0f172a; }}
-.action-button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
-.artist-links {{ display:flex; flex-wrap:wrap; gap:.35rem .75rem; }}
-@media (max-width:560px) {{ .detail-header {{ display:block; }} .detail-header .action-button {{ margin-top:.9rem; }} }}
-</style></head><body><main><p><a href="/">← Back to events</a></p><section class="card">
+<title>{escape(artist.name)} · Berlin Events Explorer</title>{theme.stylesheet_link()}</head>
+<body class="detail-page"><main><p><a href="/">← Back to events</a></p><section class="card">
 <div class="detail-header"><div><p>Berlin artist</p><h1>{escape(artist.name)}</h1></div>
 <a class="action-button" href="/approvals/artists/{escape(artist.id, quote=True)}">Edit</a></div>
 <p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p>
@@ -1930,27 +1804,9 @@ def _render_date_events_page(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Events on {target_date.isoformat()} · Berlin Events Explorer</title>
-    <style>
-      :root {{ --surface:#fff; --text:#0f172a; --muted:#64748b; --primary:#2563eb;
-        --line:#d5dbe8; }}
-      * {{ box-sizing:border-box; }}
-      body {{ margin:0; color:var(--text); background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%);
-        font-family:Inter,"Segoe UI",Roboto,sans-serif; }}
-      main {{ max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }}
-      a {{ color:var(--primary); }}
-      .page-kicker {{ margin:0 0 .3rem; color:var(--primary); font-size:.82rem;
-        font-weight:700; letter-spacing:.08em; text-transform:uppercase; }}
-      h1 {{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
-      .back-link {{ display:inline-block; margin-bottom:1.25rem; }}
-      .meta {{ color:var(--muted); font-size:.95rem; margin:.55rem 0 1.1rem; }}
-      .card {{ background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
-        padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }}
-      .empty-state {{ color:var(--muted); margin:.35rem 0; }}
-      {_event_table_styles()}
-      @media (max-width:720px) {{ main {{ padding:1rem .75rem 2rem; }} }}
-    </style>
+    {theme.stylesheet_link()}
   </head>
-  <body>
+  <body class="date-page">
     <main>
       <p class="page-kicker">Berlin Events</p>
       <a class="back-link" href="/">← Back to events</a>
@@ -2020,34 +1876,9 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{escape(venue.name)} · Berlin Events Explorer</title>
-    <style>
-      body {{ margin: 0; font-family: Inter, \"Segoe UI\", sans-serif; background: #f6f7fb; color: #0f172a; }}
-      main {{ max-width: 760px; margin: 0 auto; padding: 2rem 1.25rem 3rem; }}
-      a {{ color: #1d4ed8; }}
-      .card {{ background: #fff; border: 1px solid #d5dbe8; border-radius: .85rem; padding: 1.25rem; }}
-      .detail-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }}
-      .detail-header h1 {{ margin:.2rem 0 0; }}
-      .detail-actions {{ display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1.25rem; }}
-      .action-button {{ display:inline-flex; align-items:center; justify-content:center; min-height:2.4rem;
-        padding:.6rem .9rem; border:1px solid #1d4ed8; border-radius:.6rem; background:#1d4ed8;
-        color:#fff; font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }}
-      .action-button.secondary {{ border-color:#cbd5e1; background:#e2e8f0; color:#0f172a; }}
-      .action-button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
-      @media (max-width:560px) {{ .detail-header {{ display:block; }} .detail-header .action-button {{ margin-top:.9rem; }} }}
-      .venue-map {{ margin-top: 1.5rem; }}
-      .venue-map h2 {{ margin-bottom: .65rem; }}
-      .venue-map iframe {{ display: block; width: 100%; min-height: 22rem; border: 1px solid #d5dbe8; border-radius: .85rem; }}
-      .venue-map p {{ margin: .6rem 0 0; }}
-      dt {{ color: #64748b; margin-top: 1rem; font-size: .85rem; text-transform: uppercase; }}
-      dd {{ margin: .25rem 0 0; }}
-      .events-section {{ margin-top: 1.5rem; }}
-      .events-card {{ background: #fff; border: 1px solid #d5dbe8; border-radius: .85rem;
-        padding: .9rem; box-shadow: 0 16px 40px rgba(15,23,42,.07); }}
-      .empty-state {{ color: #64748b; margin: .35rem 0; }}
-      {_event_table_styles()}
-    </style>
+    {theme.stylesheet_link()}
   </head>
-  <body>
+  <body class="detail-page">
     <main>
       <p><a href="/venues">← Back to venues</a></p>
       <section class="card">
@@ -2345,88 +2176,6 @@ def _sse_event(event_name: str, *lines: str) -> str:
         chunks.append(f"data: {payload}")
     chunks.append("")
     return "\n".join(chunks) + "\n"
-
-
-def _event_table_styles() -> str:
-    """Return shared responsive styles for rendered event tables."""
-
-    return """
-      .event-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.95rem;
-      }
-
-      .event-table thead th {
-        font-weight: 650;
-        color: #334155;
-        text-align: left;
-        border-bottom: 1px solid #d5dbe8;
-        padding: 0.65rem 0.5rem;
-      }
-
-      .event-table th,
-      .event-table td {
-        text-align: left;
-        vertical-align: top;
-        padding: 0.6rem 0.5rem;
-        border-bottom: 1px solid #d5dbe8;
-      }
-
-      .event-table tbody tr:hover td {
-        background: #f8fafc;
-      }
-
-      .event-table tbody tr:last-child td {
-        border-bottom: none;
-      }
-
-      .event-table .date-link {
-        white-space: nowrap;
-        font-variant-numeric: tabular-nums;
-      }
-
-      @media (max-width: 720px) {
-        .event-table,
-        .event-table thead,
-        .event-table tbody,
-        .event-table tr,
-        .event-table th,
-        .event-table td {
-          display: block;
-        }
-
-        .event-table thead {
-          display: none;
-        }
-
-        .event-table tbody tr {
-          margin-bottom: 0.7rem;
-          border: 1px solid #d5dbe8;
-          border-radius: 0.7rem;
-          overflow: hidden;
-        }
-
-        .event-table tbody tr td {
-          padding: 0.45rem 0.65rem;
-          border-bottom: 1px solid #d5dbe8;
-        }
-
-        .event-table tbody tr td::before {
-          content: attr(data-label);
-          display: block;
-          color: #64748b;
-          font-size: 0.78rem;
-          margin-bottom: 0.2rem;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-        }
-
-        .event-table tbody tr td:last-child {
-          border-bottom: none;
-        }
-      }
-    """
 
 
 def _render_event_table(
@@ -2738,50 +2487,6 @@ def _render_event_row(
     )
 
 
-def _app_shell_styles() -> str:
-    """Return styles shared by every top-level application view."""
-
-    return """
-      :root { --surface:#fff; --surface-soft:#f3f5f9; --text:#0f172a;
-        --muted:#64748b; --primary:#2563eb; --line:#d5dbe8;
-        --danger:#dc2626; --radius-lg:.85rem; }
-      * { box-sizing:border-box; }
-      body { margin:0; min-height:100vh; color:var(--text);
-        font-family:Inter,"Segoe UI",Roboto,sans-serif;
-        background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%); }
-      a { color:var(--primary); }
-      .events-app { max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }
-      .events-header { margin-bottom:1rem; }
-      .page-kicker { display:inline-block; margin:0 0 .3rem; color:var(--primary);
-        font-size:.85rem; font-weight:650; letter-spacing:.08em; text-transform:uppercase; }
-      h1 { margin:0; font-size:clamp(1.5rem,2.6vw,2.15rem); line-height:1.2; }
-      .toolbar { display:flex; justify-content:space-between; align-items:center;
-        gap:.75rem; flex-wrap:wrap; }
-      .toolbar-actions { display:flex; align-items:center; gap:.55rem; }
-      .settings-link { display:inline-flex; align-items:center; min-height:2.35rem;
-        padding:.45rem .75rem; border:1px solid var(--line); border-radius:var(--radius-lg);
-        color:var(--text); background:var(--surface); text-decoration:none; font-weight:600; }
-      .settings-link:hover { border-color:#93c5fd; background:#eff6ff; }
-      .sync-button { border:1px solid transparent; padding:.5rem 1rem;
-        border-radius:var(--radius-lg); background:linear-gradient(180deg,#2563eb 0%,#1d4ed8 100%);
-        color:#fff; font:inherit; font-weight:600; cursor:pointer; }
-      .sync-button:disabled { filter:grayscale(.25); cursor:not-allowed; }
-      .sync-error { min-height:1.1rem; margin:.5rem 0; color:var(--danger); font-weight:500; }
-      .sync-progress { display:grid; gap:.45rem; margin:.75rem 0; color:var(--muted); font-size:.92rem; }
-      .sync-progress p { margin:0; }
-      .sync-progress progress { width:min(34rem,100%); height:.65rem; accent-color:var(--primary); }
-      .tabs { display:flex; gap:.35rem; align-items:center; margin:1.25rem 0 .75rem;
-        border-bottom:1px solid var(--line); overflow-x:auto; }
-      .tab { color:var(--muted); padding:.65rem .85rem; text-decoration:none;
-        border-bottom:3px solid transparent; font-weight:600; white-space:nowrap; }
-      .tab:hover,.tab.active { color:var(--primary); border-bottom-color:var(--primary); }
-      #tab-content { view-transition-name:tab-content; }
-      input:focus,a:focus,button:focus,[tabindex="0"]:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
-      @media (max-width:720px) { .events-app { padding:1rem .75rem 2rem; }
-        .toolbar { align-items:stretch; } .toolbar-actions { flex-wrap:wrap; } }
-    """
-
-
 def _fragment_url(href: str) -> str:
     """Return the fragment endpoint corresponding to a canonical application URL."""
 
@@ -2946,9 +2651,9 @@ def _render_app_page(
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{escape(title)}</title>
     <script type="module" src="{DATASTAR_SCRIPT}"></script>
-    <style>{_app_shell_styles()}{_event_shell_styles()}{_venue_shell_styles()}{_approval_styles()}</style>
+    {theme.stylesheet_link()}
   </head>
-  <body>
+  <body class="app-page">
     <main class="events-app" data-signals='{serialized_signals}'>
       <header class="events-header">
         <p class="page-kicker">Berlin Events</p>
@@ -3060,45 +2765,6 @@ def _render_event_content(
         {recent_settings}
       </section>
       {events_html}"""
-
-
-def _event_shell_styles() -> str:
-    """Return styles specific to the events tab."""
-
-    return """
-      .recent-settings { display:flex; align-items:flex-end; justify-content:flex-end; gap:.5rem;
-        margin:0; color:var(--muted); font-size:.9rem; }
-      .recent-settings label { white-space:nowrap; }
-      .recent-settings select { border:1px solid var(--line); border-radius:.45rem; padding:.35rem .5rem;
-        background:var(--surface); color:var(--text); }
-      .filter-bar { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:1rem;
-        margin:1.25rem 0 .8rem; }
-      .filter-label { display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
-        width:min(28rem,100%); }
-      .filter-input { width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
-        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }
-      .filter-wrapper { position:relative; }
-      .filter-clear { position:absolute; right:.5rem; top:50%; transform:translateY(-50%);
-        display:flex; align-items:center; justify-content:center; width:1.4rem; height:1.4rem;
-        border:0; border-radius:50%; background:#e2e8f0; color:#475569; cursor:pointer; padding:0; }
-      .result-count,.meta { color:var(--muted); font-size:.9rem; margin:0; }
-      #events-panel { margin-top:.5rem; background:var(--surface); border:1px solid var(--line);
-        border-radius:var(--radius-lg); padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }
-      .table-scroll { height:var(--table-view-height); overflow:auto; }
-      .table-footer { display:flex; align-items:center; justify-content:space-between; gap:1rem;
-        min-height:2.5rem; margin-top:.55rem; }
-      .pagination { display:flex; align-items:center; gap:.75rem; margin:0; }
-      .pagination-link { border-radius:999px; border:1px solid var(--line); color:var(--text);
-        text-decoration:none; padding:.35rem .85rem; font-size:.9rem; background:var(--surface-soft); }
-      .pagination-link.disabled { color:#94a3b8; pointer-events:none; background:#f8fafc; }
-      @media (max-width:720px) {
-        .filter-bar { grid-template-columns:minmax(0,1fr) auto; gap:.55rem; }
-        .filter-label { width:auto; min-width:0; }
-        .recent-settings { display:grid; justify-items:end; gap:.35rem; }
-        .table-footer { align-items:flex-start; flex-direction:column; }
-        .pagination { flex-wrap:wrap; }
-      }
-    """ + _event_table_styles()
 
 
 def _render_events_page_new(
@@ -3284,39 +2950,6 @@ def _filter_venue_summaries(
         if query
         in f"{summary.venue.name} {summary.venue.district or 'Not listed'}".casefold()
     ]
-
-
-def _venue_shell_styles() -> str:
-    """Return styles specific to the venue catalog tab."""
-
-    return """
-      .filter-bar { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:1rem;
-        margin:1.25rem 0 .8rem; }
-      .filter-label { display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
-        width:min(28rem,100%); }
-      .filter-input { width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
-        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }
-      .filter-input:focus,.venue-row:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
-      .result-count,.meta { color:var(--muted); font-size:.9rem; margin:0; }
-      #venue-panel { margin-top:.5rem; background:var(--surface); border:1px solid var(--line);
-        border-radius:var(--radius-lg); padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }
-      .venue-row { cursor:pointer; }
-      .venue-row:hover td,.venue-row:focus td { background:#f8fafc; }
-      .empty-state { color:var(--muted); margin:.35rem 0; }
-      .table-scroll { height:var(--table-view-height); overflow:auto; }
-      .table-footer { display:flex; align-items:center; justify-content:space-between; gap:1rem;
-        min-height:2.5rem; margin-top:.55rem; }
-      .pagination { display:flex; align-items:center; gap:.75rem; margin:0; }
-      .pagination-link { border-radius:999px; border:1px solid var(--line); color:var(--text);
-        text-decoration:none; padding:.35rem .85rem; font-size:.9rem; background:var(--surface-soft); }
-      .pagination-link.disabled { color:#94a3b8; pointer-events:none; background:#f8fafc; }
-      @media (max-width:720px) {
-        .filter-bar { grid-template-columns:minmax(0,1fr); }
-        .filter-label { width:auto; }
-        .table-footer { align-items:flex-start; flex-direction:column; }
-        .pagination { flex-wrap:wrap; }
-      }
-    """ + _event_table_styles()
 
 
 def _render_venues_page_new(
