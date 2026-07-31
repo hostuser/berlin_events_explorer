@@ -1530,17 +1530,29 @@ def _render_settings_page(
     )
 
 
-def _approval_nav() -> str:
-    """Render the top-level views with approval state selected."""
+_STAMP_TONES = {"neutral", "success", "warn", "danger"}
+_STATUS_STAMP_TONES = {
+    "verified": "success",
+    "rejected": "danger",
+    "not_a_venue": "danger",
+    "not_an_artist": "danger",
+}
 
-    return (
-        '<nav class="tabs" aria-label="Application views">'
-        '<a class="tab" href="/?tab=recent">Recently added</a>'
-        '<a class="tab" href="/?tab=upcoming">Upcoming</a>'
-        '<a class="tab" href="/venues">Venues</a>'
-        '<a class="tab active" href="/approvals">Awaiting approval</a>'
-        "</nav>"
-    )
+
+def _render_stamp(label: str, tone: str = "neutral") -> str:
+    """Render one status stamp (§7.4): text plus color, never color alone."""
+
+    if tone not in _STAMP_TONES:
+        tone = "neutral"
+    modifier = f" stamp--{tone}" if tone != "neutral" else ""
+    return f'<span class="stamp{modifier}">{escape(label)}</span>'
+
+
+def _render_status_stamp(status: VenueStatus | ArtistStatus) -> str:
+    """Render an editorial status as a stamp; pending states read as warnings."""
+
+    tone = _STATUS_STAMP_TONES.get(status.value, "warn")
+    return _render_stamp(status.value.replace("_", " ").title(), tone)
 
 
 def _venue_field(
@@ -1571,10 +1583,11 @@ def _render_venue_approval_form(
     suggestions = "".join(
         f'<a class="suggestion{" selected" if candidate == selected else ""}" '
         f'href="/approvals/venues/{escape(venue.id)}?candidate_key={escape(_candidate_key(candidate), quote=True)}">'
-        f"<strong>{escape(candidate.display_name)}</strong><br>"
+        f"<strong>{escape(candidate.display_name)}</strong>"
+        f'{" " + _render_stamp("Selected") if candidate == selected else ""}<br>'
         f'<span class="muted">{escape(candidate.address or "No address suggested")} · '
         f"{escape(candidate.website or 'No homepage suggested')} · "
-        f"confidence {candidate.confidence:.2f}</span></a>"
+        f'<span class="confidence">confidence {candidate.confidence:.2f}</span></span></a>'
         for candidate in candidates
     )
     if not suggestions:
@@ -1610,13 +1623,8 @@ def _render_venue_approval_form(
         if venue.status is VenueStatus.VERIFIED
         else "Back to approval queue"
     )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Approve {escape(venue.name)} · Berlin Events Explorer</title>
-{theme.head_assets()}</head><body class="approval-page"><main>
-<p><a href="{back_href}">← {back_label}</a></p><p class="kicker">Venue approval</p>
-<h1>{escape(venue.name)}</h1><p class="muted">Choose a suggestion or enter the venue details manually, then review and approve the form.</p>
+    content = f"""<p><a href="{back_href}">← {back_label}</a></p>
+<p class="muted">Choose a suggestion or enter the venue details manually, then review and approve the form.</p>
 {error_html}<section class="events-section" aria-labelledby="venue-events-heading">
 <h2 id="venue-events-heading">Upcoming events ({len(upcoming_events)})</h2>
 <div class="card events-card">{event_table}</div>
@@ -1636,8 +1644,16 @@ def _render_venue_approval_form(
 </div></form>
 <form method="post" action="/approvals/venues/{escape(venue.id)}/discover" class="actions">
 {_csrf_input(csrf_token)}
-<button type="submit" class="secondary">Find or refresh suggestions</button></form>
-</main></body></html>"""
+<button type="submit" class="secondary">Find or refresh suggestions</button></form>"""
+    return _render_app_page(
+        title=f"Approve {venue.name} · Berlin Events Explorer",
+        active_tab="approval-form",
+        content=content,
+        heading=venue.name,
+        kicker="Venue approval",
+        show_sync=False,
+        csrf_token=csrf_token,
+    )
 
 
 def _render_artist_approval_form(
@@ -1657,7 +1673,8 @@ def _render_artist_approval_form(
             f'value="{escape(candidate.musicbrainz_id, quote=True)}"{required}> '
             f"<strong>{escape(candidate.display_name)}</strong> · "
             f"{escape(candidate.artist_type or 'Unknown type')} · "
-            f"{escape(candidate.country or 'Unknown country')} · score {candidate.confidence:.2f}<br>"
+            f"{escape(candidate.country or 'Unknown country')} · "
+            f'<span class="confidence">score {candidate.confidence:.2f}</span><br>'
             f'<a href="{escape(candidate.source_url, quote=True)}" target="_blank" rel="noopener noreferrer">MusicBrainz</a>'
             "</label>"
             for candidate in candidates
@@ -1676,11 +1693,7 @@ def _render_artist_approval_form(
         if artist.status is ArtistStatus.VERIFIED
         else "Back to artist queue"
     )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Review {escape(artist.name)} · Berlin Events Explorer</title>{theme.head_assets()}</head>
-<body class="approval-page"><main><p><a href="{back_href}">← {back_label}</a></p>
-<p class="kicker">Artist review</p><h1>{escape(artist.name)}</h1>
+    content = f"""<p><a href="{back_href}">← {back_label}</a></p>
 <p class="muted">Choose a suggestion if needed, edit the public fields, then approve the changes.</p>{error_html}
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}" class="card">
 {_csrf_input(csrf_token)}
@@ -1695,8 +1708,16 @@ def _render_artist_approval_form(
 </div><div class="actions"><button type="submit">Approve changes</button></div></form>
 <form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}/discover" class="actions">
 {_csrf_input(csrf_token)}
-<button type="submit" class="secondary">Find or refresh suggestions</button></form>
-</main></body></html>"""
+<button type="submit" class="secondary">Find or refresh suggestions</button></form>"""
+    return _render_app_page(
+        title=f"Review {artist.name} · Berlin Events Explorer",
+        active_tab="approval-form",
+        content=content,
+        heading=artist.name,
+        kicker="Artist review",
+        show_sync=False,
+        csrf_token=csrf_token,
+    )
 
 
 def _render_artist_detail_page(
@@ -1759,16 +1780,20 @@ def _render_artist_detail_page(
         )
         or "<li>No associated events yet.</li>"
     )
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{escape(artist.name)} · Berlin Events Explorer</title>{theme.head_assets()}</head>
-<body class="detail-page"><main><p><a href="/">← Back to events</a></p><section class="card">
-<div class="detail-header"><div><p>Berlin artist</p><h1>{escape(artist.name)}</h1></div>
-<a class="action-button" href="/approvals/artists/{escape(artist.id, quote=True)}">Edit</a></div>
+    content = f"""<div class="detail-stack"><section class="card detail-card" aria-label="Artist details">
 <p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p>
 <p class="artist-links"><strong>Listen &amp; watch:</strong> {platform_links}</p>
 <p>{identity}</p>
-</section><section><h2>Events</h2><ul>{event_items}</ul></section></main></body></html>"""
+<div class="detail-actions"><a class="action-button" href="/approvals/artists/{escape(artist.id, quote=True)}">Edit artist</a></div>
+</section><section><h2>Events</h2><ul>{event_items}</ul></section></div>"""
+    return _render_app_page(
+        title=f"{artist.name} · Berlin Events Explorer",
+        active_tab="artist-detail",
+        content=content,
+        heading=artist.name,
+        kicker="Berlin artist",
+        show_sync=False,
+    )
 
 
 def _render_date_events_page(
@@ -1791,26 +1816,18 @@ def _render_date_events_page(
         empty_text="No events are listed for this date.",
     )
     event_label = "event" if len(events) == 1 else "events"
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Events on {target_date.isoformat()} · Berlin Events Explorer</title>
-    {theme.head_assets()}
-  </head>
-  <body class="date-page">
-    <main>
-      <p class="page-kicker">Berlin Events</p>
-      <a class="back-link" href="/">← Back to events</a>
-      <h1>Events on {target_date.isoformat()}</h1>
-      <p class="meta">{len(events)} {event_label} on this date.</p>
+    content = f"""<p class="meta">{len(events)} {event_label} on this date.</p>
       <section class="card" aria-label="Events on {target_date.isoformat()}">
         {event_table}
-      </section>
-    </main>
-  </body>
-</html>"""
+      </section>"""
+    return _render_app_page(
+        title=f"Events on {target_date.isoformat()} · Berlin Events Explorer",
+        active_tab="date",
+        content=content,
+        heading=f"Events on {target_date.isoformat()}",
+        kicker="Berlin events",
+        show_sync=False,
+    )
 
 
 def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
@@ -1863,20 +1880,8 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
         show_venue=False,
         empty_text="No associated events yet.",
     )
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{escape(venue.name)} · Berlin Events Explorer</title>
-    {theme.head_assets()}
-  </head>
-  <body class="detail-page">
-    <main>
-      <p><a href="/venues">← Back to venues</a></p>
-      <section class="card">
-        <div class="detail-header"><div><p>Berlin venue</p><h1>{escape(venue.name)}</h1></div>
-        <a class="action-button" href="/approvals/venues/{escape(venue.id, quote=True)}">Edit</a></div>
+    content = f"""<div class="detail-stack">
+      <section class="card detail-card" aria-label="Venue details">
         {status_note}
         <dl>
           <dt>Address</dt><dd><address>{address}</address></dd>
@@ -1884,16 +1889,23 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
           <dt>Homepage</dt><dd>{website}</dd>
         </dl>
         {map_html}
+        <div class="detail-actions"><a class="action-button" href="/approvals/venues/{escape(venue.id, quote=True)}">Edit venue</a></div>
       </section>
       <section class="events-section">
         <h2>Events</h2>
-        <div class="events-card">
+        <div class="card events-card">
           {event_table}
         </div>
       </section>
-    </main>
-  </body>
-</html>"""
+    </div>"""
+    return _render_app_page(
+        title=f"{venue.name} · Berlin Events Explorer",
+        active_tab="venues",
+        content=content,
+        heading=venue.name,
+        kicker="Berlin venue",
+        show_sync=False,
+    )
 
 
 class _SyncFinished:
@@ -3011,16 +3023,16 @@ def _render_approval_content(
     """Render the approval queue tab without the shared document shell."""
 
     venue_rows = "".join(
-        '<tr><td><span class="status">Venue</span></td>'
+        f"<tr><td>{_render_stamp('Venue')}</td>"
         f'<td><a href="/approvals/venues/{escape(venue.id)}">{escape(venue.name)}</a></td>'
-        f"<td>{escape(venue.status.value.replace('_', ' ').title())}</td>"
+        f"<td>{_render_status_stamp(venue.status)}</td>"
         f"<td>{venue_candidate_counts.get(venue.id, 0)} {'suggestion' if venue_candidate_counts.get(venue.id, 0) == 1 else 'suggestions'}</td></tr>"
         for venue in venues
     )
     artist_rows = "".join(
-        '<tr><td><span class="status">Artist</span></td>'
+        f"<tr><td>{_render_stamp('Artist')}</td>"
         f'<td><a href="/approvals/artists/{escape(artist.id)}">{escape(artist.name)}</a></td>'
-        f"<td>{escape(artist.status.value.replace('_', ' ').title())}</td>"
+        f"<td>{_render_status_stamp(artist.status)}</td>"
         f"<td>{artist_candidate_counts.get(artist.id, 0)} {'suggestion' if artist_candidate_counts.get(artist.id, 0) == 1 else 'suggestions'}</td></tr>"
         for artist in artists
     )

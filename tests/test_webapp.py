@@ -285,7 +285,8 @@ def test_webapp_date_route_lists_only_events_on_requested_date(tmp_path) -> None
     assert "Matching Event" in response.text
     assert "Earlier Event" not in response.text
     assert "Other Event" not in response.text
-    assert 'href="/"' in response.text
+    # The shared shell's nav links back to the index views.
+    assert 'href="/?tab=upcoming' in response.text
     assert invalid_response.status_code == 404
 
 

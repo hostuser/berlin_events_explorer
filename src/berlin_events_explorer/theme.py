@@ -10,10 +10,9 @@
 """Single consolidated stylesheet for the web UI (docs/design_language.md §11).
 
 All CSS lives here in cascade layers (tokens, base, components, views) and is
-served once at ``/static/app.css``. Pages opt into their rules through a class
-on ``<body>``: the shared shell uses ``app-page``; standalone documents use
-``login-page``, ``settings-page``, ``approval-page``, ``detail-page``, or
-``date-page``.
+served once at ``/static/app.css``. Every page renders inside the shared
+application shell (``app-page`` on ``<body>``) except the login form, which
+keeps its standalone ``login-page`` document.
 
 Color tokens live in ``_TOKEN_VALUES`` so the contrast test can verify every
 §3.3 pair against WCAG 2.2 AA. A hex literal outside the tokens layer is a
@@ -122,7 +121,7 @@ a:hover { background: var(--color-accent-wash); }
 button, input, select { line-height: 1.35; }
 :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 /* The timetable rule (§4.3): figures align vertically. */
-.event-table td, time, .pagination, .result-count, .meta, .stamp {
+.event-table td, time, .pagination, .result-count, .meta, .stamp, .confidence {
   font-variant-numeric: tabular-nums; }
 a, button, .tab, .pagination-link, .settings-link {
   transition: background-color var(--motion-fast) ease-out,
@@ -224,8 +223,6 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
 .empty-state { color: var(--color-text-muted); margin: .35rem 0; }
 
 /* --- approval workflow (queue tab + editor pages) --- */
-.approval-page main { max-width: 1100px; margin: 0 auto;
-  padding: var(--space-6) var(--space-5) var(--space-7); }
 .muted { color: var(--color-text-muted); }
 .card { background: var(--color-surface); border: 1px solid var(--color-line);
   border-radius: var(--radius-lg); padding: var(--space-4); }
@@ -233,9 +230,16 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
 .card th, .card td { text-align: left; padding: .7rem .55rem;
   border-bottom: 1px solid var(--color-line); }
 .card th { color: var(--color-text); font-size: var(--text-sm); }
-.status { display: inline-block; padding: .18rem .55rem;
-  border-radius: var(--radius-sm); background: var(--color-surface-sunken);
-  color: var(--color-text-muted); font-size: var(--text-xs); }
+/* Status stamps (§7.4): uppercase, bordered, transparent — text + color,
+   never color alone. */
+.stamp { display: inline-block; padding: .12rem .5rem;
+  border: 1.5px solid var(--color-text-muted); border-radius: var(--radius-sm);
+  background: transparent; color: var(--color-text-muted);
+  font-size: var(--text-xs); font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; line-height: 1.35; }
+.stamp--success { color: var(--color-success); border-color: var(--color-success); }
+.stamp--warn { color: var(--color-warn); border-color: var(--color-warn); }
+.stamp--danger { color: var(--color-danger); border-color: var(--color-danger); }
 .suggestions { display: grid; gap: .7rem; margin: var(--space-4) 0; }
 .suggestion { display: block; border: 1px solid var(--color-line);
   border-radius: var(--radius-lg); padding: .85rem; text-decoration: none;
@@ -245,21 +249,17 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .85rem; }
 .field-wide { grid-column: 1 / -1; }
-.app-page label, .approval-page label { display: block; color: var(--color-text);
+.app-page label { display: block; color: var(--color-text);
   font-size: var(--text-sm); font-weight: 600; }
-.app-page input, .approval-page input { width: 100%; margin-top: .3rem;
-  padding: .65rem .7rem; border: 1px solid var(--color-edge);
-  border-radius: var(--radius-md); color: var(--color-text);
-  background: var(--color-surface); }
+.form-grid input { width: 100%; margin-top: .3rem; padding: .65rem .7rem;
+  border: 1px solid var(--color-edge); border-radius: var(--radius-md);
+  color: var(--color-text); background: var(--color-surface); }
 .actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: var(--space-4); }
-.app-page button, .app-page .button,
-.approval-page button, .approval-page .button { border: 1px solid var(--color-text);
+.app-page button, .app-page .button { border: 1px solid var(--color-text);
   border-radius: var(--radius-md); padding: .6rem .95rem; font-weight: 700;
   cursor: pointer; background: var(--color-accent); color: var(--color-text); }
-.app-page .button, .approval-page .button { display: inline-block;
-  text-decoration: none; }
-.app-page button.secondary, .app-page .button.secondary,
-.approval-page button.secondary, .approval-page .button.secondary {
+.app-page .button { display: inline-block; text-decoration: none; }
+.app-page button.secondary, .app-page .button.secondary {
   background: var(--color-surface-sunken); color: var(--color-text);
   border-color: var(--color-edge); }
 /* Notices: wash + strong text + solid left border as the non-color cue (§7.6). */
@@ -305,9 +305,8 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
   .recent-settings { display: grid; justify-items: end; gap: .35rem; }
   .table-footer { align-items: flex-start; flex-direction: column; }
   .pagination { flex-wrap: wrap; }
-  .approval-page main { padding: var(--space-4) var(--space-3) var(--space-6); }
-  .approval-page .form-grid { grid-template-columns: 1fr; }
-  .approval-page .field-wide { grid-column: auto; }
+  .form-grid { grid-template-columns: 1fr; }
+  .field-wide { grid-column: auto; }
   .card table, .card thead, .card tbody, .card tr, .card th, .card td { display: block; }
   .card thead { display: none; }
   .card tr { border-bottom: 1px solid var(--color-line); padding: .5rem 0; }
@@ -350,7 +349,9 @@ _VIEWS = """
 .settings-card h2 { margin: .1rem 0 .55rem; font-size: var(--text-md); }
 .settings-stack label { margin-top: var(--space-4); }
 .settings-stack input { display: block; width: min(14rem, 100%);
-  margin: .4rem 0 .3rem; }
+  margin: .4rem 0 .3rem; padding: .65rem .7rem;
+  border: 1px solid var(--color-edge); border-radius: var(--radius-md);
+  color: var(--color-text); background: var(--color-surface); font: inherit; }
 .hint, .settings-card p { color: var(--color-text-muted); line-height: 1.55; }
 .settings-stack button { margin-top: .8rem; padding: .72rem 1rem; }
 .danger-zone { border-color: var(--color-danger); background: var(--color-danger-wash); }
@@ -358,13 +359,10 @@ _VIEWS = """
 .danger-button { background: var(--color-danger); color: var(--color-surface);
   border-color: var(--color-danger-strong); }
 
-/* --- venue & artist detail --- */
-.detail-page main { max-width: 760px; margin: 0 auto;
-  padding: var(--space-6) var(--space-5) var(--space-7); }
-.detail-page .card { padding: var(--space-5); }
-.detail-header { display: flex; align-items: flex-start;
-  justify-content: space-between; gap: var(--space-4); }
-.detail-header h1 { margin: .2rem 0 0; }
+/* --- venue & artist detail (shell content) --- */
+.detail-stack { display: grid; gap: var(--space-4); max-width: 760px;
+  margin-top: var(--space-4); }
+.detail-card { padding: var(--space-5); }
 .detail-actions { display: flex; flex-wrap: wrap; gap: .65rem;
   margin-top: var(--space-5); }
 .action-button { display: inline-flex; align-items: center; justify-content: center;
@@ -380,27 +378,9 @@ _VIEWS = """
 .venue-map iframe { display: block; width: 100%; min-height: 22rem;
   border: 1px solid var(--color-line); border-radius: var(--radius-lg); }
 .venue-map p { margin: .6rem 0 0; }
-.detail-page dt { color: var(--color-text-muted); margin-top: var(--space-4);
+.card dt { color: var(--color-text-muted); margin-top: var(--space-4);
   font-size: var(--text-xs); letter-spacing: .08em; text-transform: uppercase; }
-.detail-page dd { margin: .25rem 0 0; }
-.detail-page .events-card { background: var(--color-surface);
-  border: 1px solid var(--color-line); border-radius: var(--radius-lg);
-  padding: .9rem; max-height: none; overflow: visible; }
-@media (max-width: 560px) {
-  .detail-header { display: block; }
-  .detail-header .action-button { margin-top: .9rem; }
-}
-
-/* --- events-on-date --- */
-.date-page main { max-width: 1100px; margin: 0 auto;
-  padding: var(--space-6) var(--space-5) var(--space-7); }
-.date-page h1 { margin: 0; }
-.date-page .back-link { display: inline-block; margin-bottom: var(--space-5); }
-.date-page .meta { font-size: var(--text-base); margin: .55rem 0 1.1rem; }
-.date-page .card { padding: .9rem; }
-@media (max-width: 720px) {
-  .date-page main { padding: var(--space-4) var(--space-3) var(--space-6); }
-}
+.card dd { margin: .25rem 0 0; }
 """
 
 
