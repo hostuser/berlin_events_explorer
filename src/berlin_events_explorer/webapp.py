@@ -19,7 +19,7 @@ import os
 import secrets
 import subprocess
 from queue import Queue
-from threading import Thread
+from threading import Lock, Thread
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
@@ -89,6 +89,7 @@ MAX_PAGE_SIZE = 200
 TABLE_ROW_SLOT_REM = 2.75
 TABLE_HEADER_SLOT_REM = 2.4
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
+_SYNC_LOCK = Lock()
 EDITOR_PASSWORD_ENV_VAR = "BERLIN_EVENTS_EDITOR_PASSWORD"
 SECRET_KEY_ENV_VAR = "BERLIN_EVENTS_SECRET_KEY"
 CSRF_HEADER_NAME = "x-csrftoken"
@@ -216,6 +217,10 @@ def _render_login_page(
     </main>
   </body>
 </html>"""
+
+
+class SyncInProgressError(RuntimeError):
+    """Raised when a synchronization pass is already running in this process."""
 
 
 def _run_git(*args: str) -> str | None:
@@ -463,6 +468,8 @@ async def _periodic_sync(
                     store, auto_approve_threshold
                 ),
             )
+        except SyncInProgressError:
+            logger.info("Skipping scheduled sync; another sync is already running")
         except Exception:
             logger.exception("Scheduled event sync failed")
 
@@ -2682,7 +2689,9 @@ def _perform_sync_stream(
         )
     worker.join()
 
-    if isinstance(failure, (SyncError, httpx.RequestError)):
+    if isinstance(failure, SyncInProgressError):
+        sync_error = str(failure)
+    elif isinstance(failure, (SyncError, httpx.RequestError)):
         sync_error = f"Sync failed: {escape(str(failure))}"
         yield _sse_event(
             "datastar-patch-elements",
@@ -3973,16 +3982,21 @@ def perform_sync(
 ) -> None:
     """Run one synchronization pass for the configured source."""
 
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        with open_sync_cache() as cache:
-            sync_source_and_ingest_venues(
-                MyTrueIntentSource(),
-                store,
-                client,
-                http_cache=cache,
-                auto_approve_threshold=auto_approve_threshold,
-                progress=progress,
-            )
+    if not _SYNC_LOCK.acquire(blocking=False):
+        raise SyncInProgressError("A sync is already in progress.")
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            with open_sync_cache() as cache:
+                sync_source_and_ingest_venues(
+                    MyTrueIntentSource(),
+                    store,
+                    client,
+                    http_cache=cache,
+                    auto_approve_threshold=auto_approve_threshold,
+                    progress=progress,
+                )
+    finally:
+        _SYNC_LOCK.release()
 
 
 def run_server(

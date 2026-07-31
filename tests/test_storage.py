@@ -2,6 +2,9 @@
 
 from datetime import UTC, date, datetime
 
+import pytest
+from sqlalchemy.exc import IntegrityError
+
 from berlin_events_explorer.models import (
     ArtistCandidate,
     ArtistRecord,
@@ -277,3 +280,43 @@ def test_recording_refreshed_candidates_replaces_stale_results(tmp_path) -> None
     store.record_venue_candidates([first])
 
     assert store.list_venue_candidates("berghain") == [first]
+
+
+def test_engine_enables_wal_busy_timeout_and_foreign_keys(tmp_path) -> None:
+    """Concurrent readers and writers need WAL, a busy timeout, and real FKs."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    with store.engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
+        assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+
+
+def test_linking_unknown_event_or_venue_is_rejected(tmp_path) -> None:
+    """Foreign keys must be enforced instead of silently creating orphans."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    with pytest.raises(IntegrityError):
+        store.link_event_venue("missing-event", "missing-venue", source_name="Nowhere")
+
+
+def test_deleting_stale_events_also_removes_link_rows(tmp_path) -> None:
+    """Removing provider events must not leave venue or artist links behind."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    event = _event()
+    store.upsert(event)
+    store.upsert_venue(_venue())
+    store.link_event_venue(event.id, "berghain", source_name="Berghain")
+    store.upsert_artist(
+        ArtistRecord(id="dj-example", name="DJ Example", normalized_name="dj example")
+    )
+    store.link_event_artist(event.id, 1, "dj-example", source_name="DJ Example")
+
+    deleted = store.delete_events_not_in(
+        provider="test", event_ids={"some-other-event"}
+    )
+
+    assert deleted == 1
+    assert store.get_venue_ids_for_events([event.id]) == {}
+    assert store.get_artist_ids_for_event_performers([event.id]) == {}

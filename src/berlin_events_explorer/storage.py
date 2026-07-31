@@ -24,6 +24,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     distinct,
+    event as sqlalchemy_event,
     func,
     insert,
     select,
@@ -323,12 +324,23 @@ class UpsertResult:
     changes: dict[str, Any]
 
 
+def _configure_sqlite_connection(dbapi_connection: Any, _record: Any) -> None:
+    """Prepare each connection for concurrent webapp and worker access."""
+
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 class EventStore:
     """Persist canonical events and synchronization metadata in SQLite."""
 
     def __init__(self, path: str | Path) -> None:
         migrate_database(path)
         self.engine: Engine = create_engine(f"sqlite:///{Path(path)}")
+        sqlalchemy_event.listen(self.engine, "connect", _configure_sqlite_connection)
 
     def get_setting(self, key: str) -> Any | None:
         """Return one persisted application setting, if configured."""
@@ -1381,16 +1393,29 @@ class EventStore:
     ) -> int:
         """Delete provider events absent from a successfully parsed source snapshot."""
 
+        stale_ids = select(events_table.c.id).where(events_table.c.provider == provider)
         statement = delete(events_table).where(events_table.c.provider == provider)
         if event_ids:
+            stale_ids = stale_ids.where(events_table.c.id.not_in(event_ids))
             statement = statement.where(events_table.c.id.not_in(event_ids))
+
+        def _delete(conn: Connection) -> int:
+            conn.execute(
+                delete(event_venues_table).where(
+                    event_venues_table.c.event_id.in_(stale_ids)
+                )
+            )
+            conn.execute(
+                delete(event_artists_table).where(
+                    event_artists_table.c.event_id.in_(stale_ids)
+                )
+            )
+            return conn.execute(statement).rowcount
 
         if connection is None:
             with self.engine.begin() as conn:
-                result = conn.execute(statement)
-        else:
-            result = connection.execute(statement)
-        return result.rowcount
+                return _delete(conn)
+        return _delete(connection)
 
     def list_audit_log(self) -> list[AuditEntry]:
         with self.engine.connect() as connection:

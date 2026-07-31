@@ -1,9 +1,11 @@
 """Tests for the Litestar web UI."""
 
 import asyncio
+import threading
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from diskcache import Cache
 from litestar import Response
 from litestar.testing import TestClient
 
@@ -1887,3 +1889,44 @@ def test_get_default_table_size_falls_back_to_default(tmp_path) -> None:
 
     store.set_setting("default_table_size", 0)
     assert _get_default_table_size(store) == 20
+
+
+def test_perform_sync_refuses_concurrent_runs(tmp_path, monkeypatch) -> None:
+    """A second sync attempt while one is running should fail fast."""
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_ingest(*_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(webapp, "sync_source_and_ingest_venues", fake_ingest)
+    monkeypatch.setattr(
+        webapp, "open_sync_cache", lambda *a, **k: Cache(str(tmp_path / "cache"))
+    )
+    store = EventStore(tmp_path / "events.sqlite")
+    worker = threading.Thread(target=webapp.perform_sync, args=(store,), daemon=True)
+    worker.start()
+    try:
+        assert started.wait(timeout=5)
+        with pytest.raises(webapp.SyncInProgressError):
+            webapp.perform_sync(store)
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+
+def test_sync_endpoint_reports_sync_already_running(tmp_path, monkeypatch) -> None:
+    """The manual sync stream should surface an active sync as a plain notice."""
+
+    def _busy_sync(*_args, **_kwargs):
+        raise webapp.SyncInProgressError("A sync is already in progress.")
+
+    monkeypatch.setattr("berlin_events_explorer.webapp.perform_sync", _busy_sync)
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)
+        response = _post(client, "/sync")
+
+    assert response.status_code == 200
+    assert "already in progress" in response.text
