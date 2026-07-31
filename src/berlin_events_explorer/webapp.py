@@ -1143,6 +1143,16 @@ def create_app(
                 created_by=admin.id if admin is not None else None,
                 expires_at=expires_at,
             )
+            store.log(
+                level="info",
+                event="invite_created",
+                message=f"Invitation for {email} created with role {role.value}.",
+                context={
+                    "actor": admin.email if admin is not None else None,
+                    "subject": email,
+                    "role": role.value,
+                },
+            )
             return (None, raw, role, email, expires_at)
 
         error, raw, role, email, expires_at = await to_thread.run_sync(_prepare)

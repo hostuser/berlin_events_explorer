@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/berlin-events-explorer/releases/current
+EnvironmentFile=-%h/.config/berlin-events/web.env
 Environment=PATH=/home/oskar-maria/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/home/oskar-maria/.local/bin/uv run --no-sync --directory %h/.local/share/berlin-events-explorer/releases/current berlin-events web --database /home/oskar-maria/projects/dev/berlin-events-explorer/events.sqlite --host 127.0.0.1 --port 8000 --sync-interval-minutes 0
 Restart=always
