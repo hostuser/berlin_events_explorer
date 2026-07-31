@@ -1480,21 +1480,7 @@ def _render_settings_page(
         if environment == "development"
         else ""
     )
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Settings · Berlin Events Explorer</title>
-    {theme.head_assets()}
-  </head>
-  <body class="settings-page">
-    <main>
-      <header class="settings-header">
-        <div><p class="kicker">Application controls</p><h1>Settings</h1></div>
-        <a class="back-link" href="/">← Back to events</a>
-      </header>
-      {notices}
+    content = f"""{notices}
       <div class="settings-stack">
         <section class="settings-card">
           <p class="section-label">Venue enrichment</p>
@@ -1531,10 +1517,17 @@ def _render_settings_page(
           <p><strong>Version:</strong> {escape(display_version)}</p>
         </section>
         {reset}
-      </div>
-    </main>
-  </body>
-</html>"""
+      </div>"""
+    return _render_app_page(
+        title="Settings · Berlin Events Explorer",
+        active_tab="settings",
+        content=content,
+        heading="Settings",
+        kicker="Application controls",
+        show_sync=False,
+        show_settings_link=False,
+        csrf_token=csrf_token,
+    )
 
 
 def _approval_nav() -> str:
@@ -2545,13 +2538,13 @@ def _render_app_nav(
     search: str = "",
     page_size: int = DEFAULT_PAGE_SIZE,
 ) -> str:
-    """Render persistent views using one URL-aware in-place navigation contract."""
+    """Render persistent views using one URL-aware in-place navigation contract.
 
-    active_tab = (
-        active_tab
-        if active_tab in {"recent", "upcoming", "venues", "approvals"}
-        else "upcoming"
-    )
+    An ``active_tab`` outside the four tab names renders the nav with no
+    current marker — used by shell pages that are not tabs (settings,
+    detail pages).
+    """
+
     encoded_search = quote_plus(search) if search else ""
     recent_search_param = (
         f"&search={encoded_search}" if encoded_search and active_tab == "recent" else ""
@@ -2615,9 +2608,17 @@ def _render_app_page(
     recent_days: int = 7,
     search: str = "",
     heading: str = "Berlin Events Explorer",
+    kicker: str = "Berlin Events",
+    show_sync: bool = True,
+    show_settings_link: bool = True,
     csrf_token: str | None = None,
 ) -> str:
-    """Render the shared document shell around one tab's content fragment."""
+    """Render the shared document shell around one tab's content fragment.
+
+    ``show_sync`` is off for non-tab pages (settings, detail, approval
+    forms): their content is not patchable by the sync stream, and the
+    event-count heading binding belongs to the list views only.
+    """
 
     state: dict[str, object] = {
         "appView": active_tab,
@@ -2644,6 +2645,29 @@ def _render_app_page(
         "+ '&amp;recent_days=' + $eventRecentDays + '&amp;search=' "
         f"+ encodeURIComponent($eventSearch) + '&amp;view=' + $appView{sync_options})"
     )
+    heading_binding = (
+        ' data-text="$eventCount > 0 ? '
+        "'Berlin Events Explorer (' + $eventCount + ')' : 'Berlin Events Explorer'\""
+        if show_sync
+        else ""
+    )
+    sync_button = (
+        f"""<button type="button" class="sync-button" data-attr="{{'disabled': $isSyncing}}"
+              data-text="$isSyncing ? 'Syncing...' : 'Sync now'" data-on:click="{sync_action}">Sync now</button>"""
+        if show_sync
+        else ""
+    )
+    settings_link = (
+        '<a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>'
+        if show_settings_link
+        else ""
+    )
+    sync_regions = (
+        '<p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>\n'
+        '      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>'
+        if show_sync
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -2656,18 +2680,16 @@ def _render_app_page(
   <body class="app-page">
     <main class="events-app" data-signals='{serialized_signals}'>
       <header class="events-header">
-        <p class="page-kicker">Berlin Events</p>
+        <p class="page-kicker">{escape(kicker)}</p>
         <div class="toolbar">
-          <h1 data-text="$eventCount > 0 ? 'Berlin Events Explorer (' + $eventCount + ')' : 'Berlin Events Explorer'">{escape(heading)}</h1>
+          <h1{heading_binding}>{escape(heading)}</h1>
           <div class="toolbar-actions">
-            <button type="button" class="sync-button" data-attr="{{'disabled': $isSyncing}}"
-              data-text="$isSyncing ? 'Syncing...' : 'Sync now'" data-on:click="{sync_action}">Sync now</button>
-            <a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>
+            {sync_button}
+            {settings_link}
           </div>
         </div>
       </header>
-      <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
-      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>
+      {sync_regions}
       {_render_app_nav(active_tab=active_tab, recent_days=recent_days, search=search, page_size=navigation_page_size)}
       <section id="tab-content">{content}</section>
     </main>

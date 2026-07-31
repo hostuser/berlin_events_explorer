@@ -342,33 +342,21 @@ _VIEWS = """
   font-weight: 700; cursor: pointer; }
 .login-page .back-link { display: inline-block; margin-top: var(--space-4); }
 
-/* --- settings --- */
-.settings-page main { width: min(760px, calc(100% - 2rem)); margin: 0 auto;
-  padding: var(--space-6) 0 var(--space-7); }
-.settings-header { display: flex; justify-content: space-between;
-  align-items: flex-start; gap: var(--space-4); margin-bottom: var(--space-5); }
-.settings-page .back-link { white-space: nowrap; margin-top: .4rem; }
-.settings-stack { display: grid; gap: var(--space-4); }
+/* --- settings (shell content) --- */
+.settings-stack { display: grid; gap: var(--space-4); max-width: 760px;
+  margin-top: var(--space-4); }
 .settings-card { padding: var(--space-5); border: 1px solid var(--color-line);
   border-radius: var(--radius-lg); background: var(--color-surface); }
-.settings-page h2 { margin: .1rem 0 .55rem; font-size: var(--text-md); }
-.settings-page label { display: block; margin-top: var(--space-4); font-weight: 600; }
-.settings-page input { display: block; width: min(14rem, 100%); margin: .4rem 0 .3rem;
-  padding: .72rem .8rem; border: 1px solid var(--color-edge);
-  border-radius: var(--radius-md); font: inherit; }
+.settings-card h2 { margin: .1rem 0 .55rem; font-size: var(--text-md); }
+.settings-stack label { margin-top: var(--space-4); }
+.settings-stack input { display: block; width: min(14rem, 100%);
+  margin: .4rem 0 .3rem; }
 .hint, .settings-card p { color: var(--color-text-muted); line-height: 1.55; }
-.settings-page button { margin-top: .8rem; padding: .72rem 1rem;
-  border: 1px solid var(--color-text); border-radius: var(--radius-md);
-  background: var(--color-accent); color: var(--color-text); font: inherit;
-  font-weight: 700; cursor: pointer; }
+.settings-stack button { margin-top: .8rem; padding: .72rem 1rem; }
 .danger-zone { border-color: var(--color-danger); background: var(--color-danger-wash); }
 .danger-zone .section-label, .danger-zone h2 { color: var(--color-danger-strong); }
-.settings-page .danger-button { background: var(--color-danger);
-  color: var(--color-surface); border-color: var(--color-danger-strong); }
-@media (max-width: 560px) {
-  .settings-header { display: block; }
-  .settings-page .back-link { display: inline-block; margin-top: var(--space-4); }
-}
+.danger-button { background: var(--color-danger); color: var(--color-surface);
+  border-color: var(--color-danger-strong); }
 
 /* --- venue & artist detail --- */
 .detail-page main { max-width: 760px; margin: 0 auto;
