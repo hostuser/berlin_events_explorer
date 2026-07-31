@@ -2083,3 +2083,36 @@ def test_approvals_tab_avoids_per_row_candidate_queries(tmp_path, monkeypatch) -
     assert response.status_code == 200
     assert "Venue 0" in response.text
     assert per_row_calls == []
+
+
+def test_responses_carry_security_headers(tmp_path) -> None:
+    """Every response should ship the baseline security headers."""
+
+    with TestClient(
+        create_app(tmp_path / "events.sqlite", sync_interval=None)
+    ) as client:
+        response = client.get("/")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    csp = response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "frame-src https://www.openstreetmap.org" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "object-src 'none'" in csp
+
+
+def test_datastar_is_served_from_the_same_origin(tmp_path) -> None:
+    """The UI runtime must not depend on a third-party CDN."""
+
+    with TestClient(
+        create_app(tmp_path / "events.sqlite", sync_interval=None)
+    ) as client:
+        page = client.get("/").text
+        asset = client.get("/static/datastar.js")
+
+    assert "cdn.jsdelivr.net" not in page
+    assert 'src="/static/datastar.js"' in page
+    assert asset.status_code == 200
+    assert asset.text.startswith("// Datastar v1.0.0-RC.7")

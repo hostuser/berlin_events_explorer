@@ -39,8 +39,10 @@ from litestar.enums import RequestEncodingType
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers import BaseRouteHandler
 from litestar.middleware.session.server_side import ServerSideSessionConfig
+from litestar.datastructures import ResponseHeader
 from litestar.params import Body, FromPath, FromQuery, QueryParameter
 from litestar.response import Redirect, Response, Stream
+from litestar.static_files import create_static_files_router
 from litestar.stores.memory import MemoryStore
 from litestar.utils.scope.state import ScopeState
 from pydantic import ValidationError
@@ -81,9 +83,23 @@ from berlin_events_explorer.venue_ingestion import (
 from berlin_events_explorer.venues import normalize_venue_name
 from berlin_events_explorer.artists import normalize_artist_name
 
-DATASTAR_SCRIPT = (
-    "https://cdn.jsdelivr.net/gh/starfederation/datastar"
-    "@v1.0.0-RC.7/bundles/datastar.js"
+# Vendored pinned build (v1.0.0-RC.7); served same-origin so the strict CSP
+# below can forbid third-party script hosts entirely.
+DATASTAR_SCRIPT = "/static/datastar.js"
+STATIC_DIRECTORY = Path(__file__).parent / "static"
+# Datastar compiles expressions with the Function constructor and the UI uses
+# inline <script>/<style>, so script-src needs 'unsafe-inline' 'unsafe-eval'.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-src https://www.openstreetmap.org; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'"
 )
 DEFAULT_PAGE_SIZE = 50
 DEFAULT_TABLE_SIZE = 20
@@ -1295,11 +1311,24 @@ def create_app(
             login_page,
             do_login,
             logout,
+            create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
         ],
         middleware=[session_config.middleware],
         csrf_config=csrf_config,
         stores={"sessions": MemoryStore()},
         exception_handlers={NotAuthorizedException: _handle_not_authorized},
+        response_headers=[
+            ResponseHeader(
+                name="Content-Security-Policy",
+                value=CONTENT_SECURITY_POLICY,
+                documentation_only=False,
+            ),
+            ResponseHeader(name="X-Content-Type-Options", value="nosniff"),
+            ResponseHeader(name="X-Frame-Options", value="DENY"),
+            ResponseHeader(
+                name="Referrer-Policy", value="strict-origin-when-cross-origin"
+            ),
+        ],
         lifespan=[periodic_sync_lifespan],
     )
 
