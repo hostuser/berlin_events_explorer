@@ -58,6 +58,7 @@ from berlin_events_explorer.auth import (
     hash_token,
     requires_admin,
     requires_editor,
+    requires_user,
     verify_password,
 )
 from berlin_events_explorer.emails import (
@@ -463,6 +464,86 @@ def _render_invite_result_page(
         content=content,
         heading="Invitation",
         kicker="User management",
+        show_sync=False,
+        csrf_token=csrf_token,
+        user=user,
+    )
+
+
+def _render_account_page(
+    user: UserRecord,
+    *,
+    table_size_override: int | None,
+    site_default_table_size: int,
+    notice: str | None = None,
+    error: str | None = None,
+    csrf_token: str | None = None,
+) -> str:
+    """Render profile, password, and preference forms for one account."""
+
+    notices = ""
+    if notice:
+        notices += f'<p class="notice success">{escape(notice)}</p>'
+    if error:
+        notices += f'<p class="notice error">{escape(error)}</p>'
+    override_value = "" if table_size_override is None else str(table_size_override)
+    content = f"""{notices}
+      <div class="settings-stack">
+        <section class="settings-card">
+          <p class="section-label">Profile</p>
+          <h2>{escape(user.display_name)}</h2>
+          <p>Signed in as <strong>{escape(user.email)}</strong> ·
+          {escape(user.role.value)} role.</p>
+          <form method="post" action="/account">
+            {_csrf_input(csrf_token)}
+            <input type="hidden" name="action" value="profile" />
+            <label for="display-name">Display name</label>
+            <input id="display-name" name="display_name" type="text" required
+              value="{escape(user.display_name, quote=True)}" />
+            <br /><button type="submit">Save profile</button>
+          </form>
+        </section>
+        <section class="settings-card">
+          <p class="section-label">Security</p>
+          <h2>Change password</h2>
+          <form method="post" action="/account">
+            {_csrf_input(csrf_token)}
+            <input type="hidden" name="action" value="password" />
+            <label for="current-password">Current password</label>
+            <input id="current-password" name="current_password" type="password"
+              required autocomplete="current-password" />
+            <label for="new-password">New password</label>
+            <input id="new-password" name="password" type="password" required
+              minlength="10" autocomplete="new-password" />
+            <small class="hint">Use at least 10 characters.</small>
+            <label for="new-password-repeat">Repeat new password</label>
+            <input id="new-password-repeat" name="password_repeat" type="password"
+              required minlength="10" autocomplete="new-password" />
+            <br /><button type="submit">Change password</button>
+          </form>
+        </section>
+        <section class="settings-card">
+          <p class="section-label">Preferences</p>
+          <h2>Tables</h2>
+          <form method="post" action="/account">
+            {_csrf_input(csrf_token)}
+            <input type="hidden" name="action" value="preferences" />
+            <label for="account-table-size">Rows per table</label>
+            <input id="account-table-size" name="default_table_size" type="number"
+              min="1" max="{MAX_PAGE_SIZE}" step="1"
+              value="{escape(override_value, quote=True)}" />
+            <small class="hint">Leave empty to use the site default
+            ({site_default_table_size} rows).</small>
+            <br /><button type="submit">Save preferences</button>
+          </form>
+        </section>
+      </div>"""
+    return _render_app_page(
+        title="Account · Berlin Events Explorer",
+        active_tab="account",
+        content=content,
+        heading="Your account",
+        kicker="Account",
         show_sync=False,
         csrf_token=csrf_token,
         user=user,
@@ -1162,6 +1243,139 @@ def create_app(
 
         return await to_thread.run_sync(_handle)
 
+    def _account_page_response(
+        request: Request,
+        user: UserRecord,
+        *,
+        notice: str | None = None,
+        error: str | None = None,
+        status_code: int = 200,
+    ) -> Response:
+        """Render the account page with the caller's fresh account state."""
+
+        return Response(
+            content=_render_account_page(
+                user,
+                table_size_override=_account_table_size_override(user),
+                site_default_table_size=_get_default_table_size(store),
+                notice=notice,
+                error=error,
+                csrf_token=_csrf_token_from(request),
+            ),
+            media_type="text/html",
+            status_code=status_code,
+        )
+
+    def _account_table_size_override(user: UserRecord) -> int | None:
+        preferred = store.get_user_setting(user.id, "default_table_size")
+        if (
+            isinstance(preferred, int)
+            and not isinstance(preferred, bool)
+            and 1 <= preferred <= MAX_PAGE_SIZE
+        ):
+            return preferred
+        return None
+
+    # Shared-path note: async + thread pool, like the invite handlers.
+    @get("/account", guards=[requires_user])
+    async def account_page(
+        request: Request, saved: FromQuery[str | None] = None
+    ) -> Response:
+        """Render the signed-in account's profile and preferences."""
+
+        user = request.scope.get("user")
+        if user is None:  # pragma: no cover - the guard already enforces this
+            return _login_redirect("/account")
+        notices = {
+            "profile": "Profile saved.",
+            "password": "Password changed.",
+            "preferences": "Preferences saved.",
+        }
+        return await to_thread.run_sync(
+            lambda: _account_page_response(
+                request, user, notice=notices.get(saved or "")
+            )
+        )
+
+    @post("/account")
+    async def save_account(
+        request: Request,
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Apply one of the account forms: profile, password, or preferences."""
+
+        user = request.scope.get("user")
+        if user is None:
+            raise NotAuthorizedException("Login required.")
+        action = _form_string(data, "action")
+
+        def _handle() -> Redirect | Response:
+            if action == "profile":
+                display_name = _form_string(data, "display_name").strip()
+                if not display_name:
+                    return _account_page_response(
+                        request, user, error="Enter a display name.", status_code=400
+                    )
+                store.update_user(user.id, display_name=display_name)
+                return Redirect("/account?saved=profile", status_code=303)
+            if action == "password":
+                current = _form_string(data, "current_password")
+                password = _form_string(data, "password")
+                repeat = _form_string(data, "password_repeat")
+                credentials = store.get_user_credentials(user.email)
+                if credentials is None or not verify_password(
+                    credentials.password_hash, current
+                ):
+                    return _account_page_response(
+                        request,
+                        user,
+                        error="The current password is not correct.",
+                        status_code=400,
+                    )
+                if len(password) < 10:
+                    return _account_page_response(
+                        request,
+                        user,
+                        error="Choose a password of at least 10 characters.",
+                        status_code=400,
+                    )
+                if password != repeat:
+                    return _account_page_response(
+                        request,
+                        user,
+                        error="The passwords do not match.",
+                        status_code=400,
+                    )
+                store.update_user(user.id, password_hash=hash_password(password))
+                return Redirect("/account?saved=password", status_code=303)
+            if action == "preferences":
+                raw_size = _form_string(data, "default_table_size").strip()
+                if not raw_size:
+                    store.delete_user_setting(user.id, "default_table_size")
+                    return Redirect("/account?saved=preferences", status_code=303)
+                try:
+                    size = int(raw_size)
+                except ValueError:
+                    size = 0
+                if not 1 <= size <= MAX_PAGE_SIZE:
+                    return _account_page_response(
+                        request,
+                        user,
+                        error=(
+                            f"Rows per table must be between 1 and {MAX_PAGE_SIZE}."
+                        ),
+                        status_code=400,
+                    )
+                store.set_user_setting(user.id, "default_table_size", size)
+                return Redirect("/account?saved=preferences", status_code=303)
+            return _account_page_response(
+                request, user, error="Unsupported account action.", status_code=400
+            )
+
+        return await to_thread.run_sync(_handle)
+
     @get("/", sync_to_thread=True)
     def index(
         request: Request,
@@ -1182,7 +1396,7 @@ def create_app(
         if tab == "venues":
             summaries = store.list_venue_summaries()
             normalized_page_size = _normalize_page_size(
-                page_size or _get_default_table_size(store)
+                page_size or _get_default_table_size(store, request.scope.get("user"))
             )
             if fragment:
                 return _render_tab_fragment(
@@ -1254,6 +1468,7 @@ def create_app(
             tab=tab,
             recent_days=recent_days,
             search=search,
+            user=request.scope.get("user"),
         )
         if fragment:
             return _render_tab_fragment(
@@ -1291,6 +1506,7 @@ def create_app(
 
     @get("/events/search", sync_to_thread=True)
     def search_events(
+        request: Request,
         page_size: int = 0,
         tab: str = "recent",
         recent_days: int = 7,
@@ -1310,6 +1526,7 @@ def create_app(
         ) = _event_listing_data(
             store,
             page=1,
+            user=request.scope.get("user"),
             page_size=page_size,
             tab=tab,
             recent_days=recent_days,
@@ -1696,6 +1913,7 @@ def create_app(
 
     @post("/sync", status_code=200, sync_to_thread=True, guards=[requires_editor])
     def sync(
+        request: Request,
         page: int = 1,
         page_size: int = 0,
         tab: str = "recent",
@@ -1707,7 +1925,8 @@ def create_app(
             content=_perform_sync_stream(
                 store,
                 page=page,
-                page_size=page_size or _get_default_table_size(store),
+                page_size=page_size
+                or _get_default_table_size(store, request.scope.get("user")),
                 tab=tab,
                 recent_days=recent_days,
                 search=search,
@@ -1936,6 +2155,8 @@ def create_app(
             request_password_reset,
             password_reset_form,
             do_password_reset,
+            account_page,
+            save_account,
             create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
         ],
         middleware=[
@@ -2016,9 +2237,19 @@ def _get_musicbrainz_metadata_fetch_limit(store: EventStore) -> int:
     return DEFAULT_MUSICBRAINZ_FETCH_LIMIT
 
 
-def _get_default_table_size(store: EventStore) -> int:
-    """Return persisted default table row count, falling back to the default."""
+def _get_default_table_size(
+    store: EventStore, user: UserRecord | None = None
+) -> int:
+    """Return the account's preferred table row count, then the site default."""
 
+    if user is not None:
+        preferred = store.get_user_setting(user.id, "default_table_size")
+        if (
+            isinstance(preferred, int)
+            and not isinstance(preferred, bool)
+            and 1 <= preferred <= MAX_PAGE_SIZE
+        ):
+            return preferred
     configured = store.get_setting("default_table_size")
     if (
         isinstance(configured, int)
@@ -2037,6 +2268,7 @@ def _event_listing_data(
     tab: str,
     recent_days: int,
     search: str,
+    user: UserRecord | None = None,
 ) -> tuple[
     list[Event],
     int,
@@ -2051,7 +2283,7 @@ def _event_listing_data(
 
     normalized_days = _normalize_recent_days(recent_days)
     normalized_page_size = _normalize_page_size(
-        page_size or _get_default_table_size(store)
+        page_size or _get_default_table_size(store, user)
     )
     paged_events, filtered_count, current_page, total_pages = store.query_events(
         tab="recent" if tab == "recent" else "upcoming",
@@ -3394,7 +3626,7 @@ def _render_app_page(
         account_html = '<a class="settings-link" href="/login">Log in</a>'
     else:
         account_html = (
-            f'<span class="account-name">{escape(user.display_name)}</span>'
+            f'<a class="settings-link" href="/account">{escape(user.display_name)}</a>'
             '<form method="post" action="/logout" class="logout-form">'
             f"{_csrf_input(csrf_token)}"
             '<button type="submit" class="logout-button">Log out</button></form>'
