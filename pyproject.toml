@@ -29,6 +29,8 @@ dependencies = [
     "rich>=13.0",
     "sqlalchemy>=2.0",
     "uvicorn>=0.29",
+    "argon2-cffi>=23.1",
+    "litestar-email[smtp]>=0.4.0",
 ]
 dynamic = ["version"]
 
