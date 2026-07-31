@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    and_,
     case,
     Column,
+    Computed,
     Connection,
     DateTime,
     Engine,
@@ -27,6 +30,7 @@ from sqlalchemy import (
     event as sqlalchemy_event,
     func,
     insert,
+    or_,
     select,
     update,
 )
@@ -42,6 +46,7 @@ from berlin_events_explorer.models import (
     VenueMetadata,
     VenueRecord,
     VenueStatus,
+    event_search_text,
 )
 
 
@@ -55,9 +60,26 @@ events_table = Table(
     Column("provider", String(100), nullable=False, index=True),
     Column("source_record_hash", String(64), nullable=False),
     Column("event_json", JSON, nullable=False),
-    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False, index=True),
     Column("last_seen_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "start_date",
+        String(10),
+        Computed("json_extract(event_json, '$.start_date')", persisted=False),
+        index=True,
+    ),
+    Column(
+        "end_date",
+        String(10),
+        Computed("json_extract(event_json, '$.end_date')", persisted=False),
+    ),
+    Column(
+        "title",
+        Text,
+        Computed("json_extract(event_json, '$.title')", persisted=False),
+    ),
+    Column("search_text", Text),
 )
 venues_table = Table(
     "venues",
@@ -341,6 +363,25 @@ class EventStore:
         migrate_database(path)
         self.engine: Engine = create_engine(f"sqlite:///{Path(path)}")
         sqlalchemy_event.listen(self.engine, "connect", _configure_sqlite_connection)
+        self._backfill_search_text()
+
+    def _backfill_search_text(self) -> None:
+        """Make rows written before the search column existed searchable."""
+
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(events_table.c.id, events_table.c.event_json).where(
+                    events_table.c.search_text.is_(None)
+                )
+            ).all()
+            for event_id, payload in rows:
+                connection.execute(
+                    update(events_table)
+                    .where(events_table.c.id == event_id)
+                    .values(
+                        search_text=event_search_text(Event.model_validate(payload))
+                    )
+                )
 
     def get_setting(self, key: str) -> Any | None:
         """Return one persisted application setting, if configured."""
@@ -568,6 +609,7 @@ class EventStore:
                     first_seen_at=event.first_seen_at or now,
                     last_seen_at=event.last_seen_at or now,
                     updated_at=now,
+                    search_text=event_search_text(event),
                 )
             )
             action = "created"
@@ -594,6 +636,7 @@ class EventStore:
                     event_json=payload,
                     last_seen_at=now,
                     updated_at=now,
+                    search_text=event_search_text(event),
                 )
             )
             action = "updated"
@@ -612,6 +655,96 @@ class EventStore:
     def list_events(self) -> list[Event]:
         with self.engine.connect() as connection:
             rows = connection.execute(select(events_table.c.event_json)).all()
+        return [Event.model_validate(row[0]) for row in rows]
+
+    def query_events(
+        self,
+        *,
+        tab: str,
+        recent_days: int,
+        search: str,
+        page: int,
+        page_size: int,
+        now: datetime | None = None,
+    ) -> tuple[list[Event], int, int, int]:
+        """Filter, sort, and paginate one listing view entirely in SQL.
+
+        Returns the requested page of events, the filtered total, the
+        clamped current page, and the total number of pages.
+        """
+
+        now = now or datetime.now(timezone.utc)
+        today = date.today().isoformat()
+        conditions = []
+        if tab == "recent":
+            conditions.append(
+                events_table.c.first_seen_at >= now - timedelta(days=recent_days)
+            )
+            conditions.append(
+                or_(
+                    events_table.c.start_date.is_(None),
+                    events_table.c.start_date >= today,
+                )
+            )
+            order_by = (events_table.c.first_seen_at.desc(), events_table.c.id)
+        else:
+            conditions.append(events_table.c.start_date.is_not(None))
+            conditions.append(events_table.c.start_date >= today)
+            order_by = (
+                events_table.c.start_date,
+                func.lower(events_table.c.title),
+                events_table.c.id,
+            )
+        needle = search.strip().casefold()
+        if needle:
+            conditions.append(
+                events_table.c.search_text.contains(needle, autoescape=True)
+            )
+
+        with self.engine.connect() as connection:
+            total_count = int(
+                connection.execute(
+                    select(func.count()).select_from(events_table).where(*conditions)
+                ).scalar_one()
+            )
+            total_pages = (
+                max(1, math.ceil(total_count / page_size)) if total_count else 1
+            )
+            current_page = min(max(1, page), total_pages)
+            rows = connection.execute(
+                select(events_table.c.event_json)
+                .where(*conditions)
+                .order_by(*order_by)
+                .limit(page_size)
+                .offset((current_page - 1) * page_size)
+            ).all()
+        events = [Event.model_validate(row[0]) for row in rows]
+        return events, total_count, current_page, total_pages
+
+    def list_events_on_date(self, target_date: date) -> list[Event]:
+        """Return events whose date or date range includes the requested date."""
+
+        iso_date = target_date.isoformat()
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(events_table.c.event_json)
+                .where(
+                    events_table.c.start_date.is_not(None),
+                    or_(
+                        events_table.c.start_date == iso_date,
+                        and_(
+                            events_table.c.end_date.is_not(None),
+                            events_table.c.start_date <= iso_date,
+                            events_table.c.end_date >= iso_date,
+                        ),
+                    ),
+                )
+                .order_by(
+                    events_table.c.start_date,
+                    func.lower(events_table.c.title),
+                    events_table.c.id,
+                )
+            ).all()
         return [Event.model_validate(row[0]) for row in rows]
 
     def upsert_artist(
@@ -1095,8 +1228,7 @@ class EventStore:
                 func.count(
                     case(
                         (
-                            func.json_extract(events_table.c.event_json, "$.start_date")
-                            >= date.today().isoformat(),
+                            events_table.c.start_date >= date.today().isoformat(),
                             event_venues_table.c.event_id,
                         ),
                     )

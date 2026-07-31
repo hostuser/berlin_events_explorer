@@ -319,3 +319,13 @@ class Event(BaseModel):
         if value is not None and start_date is not None and value < start_date:
             raise ValueError("end_date must not precede start_date")
         return value
+
+
+def event_search_text(event: Event) -> str:
+    """Build a case-folded haystack from title, venue, and performers."""
+
+    parts = [event.title]
+    if event.venue is not None:
+        parts.append(event.venue.name)
+    parts.extend(performer.name for performer in event.performers)
+    return " ".join(parts).casefold()

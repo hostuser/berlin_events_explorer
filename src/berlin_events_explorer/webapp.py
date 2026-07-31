@@ -60,6 +60,7 @@ from berlin_events_explorer.models import (
     VenueMetadata,
     VenueRecord,
     VenueStatus,
+    event_search_text,
 )
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore, VenueSummary
@@ -767,7 +768,7 @@ def create_app(
                 media_type="text/html",
                 status_code=404,
             )
-        events = _events_on_date(list(store.list_events()), target_date=target_date)
+        events = store.list_events_on_date(target_date)
         event_ids = [event.id for event in events]
         return Response(
             content=_render_date_events_page(
@@ -1352,20 +1353,20 @@ def _event_listing_data(
     """Build the filtered, paginated event listing and its metadata."""
 
     normalized_days = _normalize_recent_days(recent_days)
-    effective_page_size = page_size or _get_default_table_size(store)
-    events = _events_for_tab(
-        list(store.list_events()), tab=tab, recent_days=normalized_days
+    normalized_page_size = _normalize_page_size(
+        page_size or _get_default_table_size(store)
     )
-    filtered_events = _filter_events(events, search)
-    paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
-        filtered_events,
+    paged_events, filtered_count, current_page, total_pages = store.query_events(
+        tab="recent" if tab == "recent" else "upcoming",
+        recent_days=normalized_days,
+        search=search,
         page=page,
-        page_size=effective_page_size,
+        page_size=normalized_page_size,
     )
     event_ids = [event.id for event in paged_events]
     return (
         paged_events,
-        len(filtered_events),
+        filtered_count,
         current_page,
         normalized_page_size,
         total_pages,
@@ -2639,17 +2640,17 @@ def _perform_sync_stream(
     """Run sync and emit Datastar SSE patch events."""
 
     normalized_days = _normalize_recent_days(recent_days)
-    current_events = _filter_events(
-        _events_for_tab(
-            list(store.list_events()), tab=tab, recent_days=normalized_days
-        ),
-        search,
+    normalized_tab = "recent" if tab == "recent" else "upcoming"
+    _, current_count, _, _ = store.query_events(
+        tab=normalized_tab,
+        recent_days=normalized_days,
+        search=search,
+        page=1,
+        page_size=1,
     )
     yield _sse_event(
         "datastar-patch-signals",
-        _signals_payload(
-            event_count=len(current_events), is_syncing=True, sync_error=None
-        ),
+        _signals_payload(event_count=current_count, is_syncing=True, sync_error=None),
     )
     yield _sse_event(
         "datastar-patch-elements",
@@ -2702,21 +2703,18 @@ def _perform_sync_stream(
     else:
         sync_error = None
 
-    synced_events = _filter_events(
-        _events_for_tab(
-            list(store.list_events()), tab=tab, recent_days=normalized_days
-        ),
-        search,
-    )
-    paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
-        synced_events,
+    normalized_page_size = _normalize_page_size(page_size)
+    paged_events, synced_count, current_page, total_pages = store.query_events(
+        tab=normalized_tab,
+        recent_days=normalized_days,
+        search=search,
         page=page,
-        page_size=page_size,
+        page_size=normalized_page_size,
     )
     if view == "events":
         events_panel = _render_events_panel(
             paged_events,
-            total_count=len(synced_events),
+            total_count=synced_count,
             page=current_page,
             page_size=normalized_page_size,
             total_pages=total_pages,
@@ -2780,7 +2778,7 @@ def _perform_sync_stream(
     yield _sse_event(
         "datastar-patch-signals",
         _signals_payload(
-            event_count=len(synced_events),
+            event_count=synced_count,
             is_syncing=False,
             sync_error=sync_error,
         ),
@@ -3218,14 +3216,7 @@ def _render_tabs(*, tab: str, recent_days: int, search: str = "") -> str:
     )
 
 
-def _event_search_text(event: Event) -> str:
-    """Build a case-folded haystack from title, venue, and performers."""
-
-    parts = [event.title]
-    if event.venue is not None:
-        parts.append(event.venue.name)
-    parts.extend(performer.name for performer in event.performers)
-    return " ".join(parts).casefold()
+_event_search_text = event_search_text
 
 
 def _filter_events(events: list[Event], search: str) -> list[Event]:
