@@ -135,8 +135,13 @@ Git hooks are kept under `.githooks/` and enabled per checkout with:
 ```
 
 - Each regular commit restarts only `berlin-events-development.service`.
-- Creating a new Git tag restarts `berlin-events-webfrontend.service`, making the
-  tagged checkout the production deployment.
+- Creating a new Git tag creates an immutable detached worktree at
+  `~/.local/share/berlin-events-explorer/releases/<tag>`, verifies it is clean and
+  points at that tag, synchronizes its locked production dependencies, atomically switches
+  the `releases/current` symlink, and restarts the production frontend.
+- Both production services execute exclusively from `releases/current`; the mutable
+  development checkout is never used for production code. The production SQLite database
+  remains at `~/projects/dev/berlin-events-explorer/events.sqlite`.
 - Moving or deleting an existing tag does not restart production.
 
 The production and development services are intentionally independent; the development

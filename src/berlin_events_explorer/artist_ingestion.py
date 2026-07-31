@@ -44,8 +44,8 @@ def enrich_artists(
 ) -> ArtistEnrichmentResult:
     """Discover candidates for a small batch and queue all non-safe matches."""
 
-    if not 1 <= limit <= 50:
-        raise ValueError("artist enrichment limit must be between 1 and 50")
+    if not 1 <= limit <= 200:
+        raise ValueError("artist enrichment limit must be between 1 and 200")
     artists = [
         artist
         for artist in store.list_artists()

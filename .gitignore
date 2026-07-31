@@ -1,6 +1,5 @@
 # project-files
 src/berlin_events_explorer/_version.py
-uv.lock
 pixi.lock
 .pixi/
 .venv/

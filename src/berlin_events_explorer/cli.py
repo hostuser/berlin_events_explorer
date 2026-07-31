@@ -510,7 +510,7 @@ def artists_accept(database: Path, artist_id: str, musicbrainz_id: str) -> None:
     help="SQLite database path.",
 )
 @click.option(
-    "--artist-limit", type=click.IntRange(min=1, max=50), default=10, show_default=True
+    "--artist-limit", type=click.IntRange(min=1, max=200), default=10, show_default=True
 )
 @click.option(
     "--homepage-limit",

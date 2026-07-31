@@ -53,6 +53,34 @@ def test_production_worker_units_run_hourly_without_web_process_sync() -> None:
     assert "berlin-events-worker-production.service" in timer
 
 
+def test_production_services_run_only_the_current_tagged_release() -> None:
+    """Production services must execute the immutable release worktree, not develop."""
+
+    root = Path(__file__).parents[1]
+    release_directory = "%h/.local/share/berlin-events-explorer/releases/current"
+    web_service = (root / "deploy" / "berlin-events-production.service").read_text()
+    worker_service = (
+        root / "deploy" / "berlin-events-worker-production.service"
+    ).read_text()
+    deployment_script = (root / "scripts" / "deploy-production-release.sh").read_text()
+    tag_hook = (root / ".githooks" / "reference-transaction").read_text()
+
+    for service in (web_service, worker_service):
+        assert f"WorkingDirectory={release_directory}" in service
+        assert f"--directory {release_directory}" in service
+        assert "projects/dev/berlin-events-explorer berlin-events" not in service
+
+    assert "worktree add --detach" in deployment_script
+    assert "tag --points-at" in deployment_script
+    assert 'RELEASE_CURRENT="$RELEASES_DIR/current"' in deployment_script
+    assert "berlin-events-webfrontend.service" in deployment_script
+    assert (
+        '"$UV" sync --directory "$RELEASE_DIR" --frozen --no-dev' in deployment_script
+    )
+    assert (root / "uv.lock").is_file()
+    assert "deploy-production-release.sh" in tag_hook
+
+
 def test_worker_command_exposes_bounded_batch_options() -> None:
     """Operators should be able to cap worker provider work from the CLI."""
 
@@ -60,8 +88,18 @@ def test_worker_command_exposes_bounded_batch_options() -> None:
 
     assert result.exit_code == 0, result.output
     assert "--artist-limit" in result.output
+    assert "1<=x<=200" in result.output
     assert "--homepage-limit" in result.output
     assert "--database" in result.output
+
+
+def test_production_worker_uses_a_200_artist_backlog_batch() -> None:
+    """Production should process the initial artist backlog at 200 per run."""
+
+    root = Path(__file__).parents[1]
+    service = (root / "deploy" / "berlin-events-worker-production.service").read_text()
+
+    assert "--artist-limit 200" in service
 
 
 def test_run_worker_records_successful_phases(tmp_path) -> None:

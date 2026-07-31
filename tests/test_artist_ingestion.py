@@ -79,6 +79,35 @@ def test_enrich_artists_records_no_match_and_does_not_repeat_it(tmp_path) -> Non
     assert provider.calls == 1
 
 
+def test_enrich_artists_accepts_a_200_artist_batch_for_initial_backfill(
+    tmp_path,
+) -> None:
+    """The bounded backfill batch may process up to 200 artist records."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.upsert(
+        Event(
+            id="event-200",
+            source=EventSourceRef(
+                provider="test",
+                source_url="https://example.test/events/200",
+                source_record_hash="event-200",
+            ),
+            start_date=date(2026, 8, 1),
+            title="Backfill event",
+            performers=[
+                Performer(name=f"Artist {index}", billing_order=index)
+                for index in range(1, 201)
+            ],
+        )
+    )
+    bootstrap_artist_catalog(store)
+
+    result = enrich_artists(store, _NoMatchProvider(), limit=200)
+
+    assert (result.checked, result.no_match, result.remaining) == (200, 200, 0)
+
+
 def test_enrich_artists_auto_approves_exact_match_and_queues_other_candidates(
     tmp_path,
 ) -> None:

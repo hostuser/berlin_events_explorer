@@ -96,7 +96,7 @@ uv run berlin-events worker --database events.sqlite
 Each pass performs these serial phases:
 
 1. Synchronize the event source and ingest newly encountered venues.
-2. Discover MusicBrainz candidates for at most 10 unresolved artists.
+2. Discover MusicBrainz candidates for at most 200 unresolved artists in the production backlog worker (the CLI default remains 10).
 3. Retrieve official homepages for at most 10 verified artists missing that metadata.
 
 The public-provider safeguards remain in effect: Nominatim is rate-limited, MusicBrainz has
@@ -106,6 +106,9 @@ batch sizes when running manually:
 ```bash
 uv run berlin-events worker --database events.sqlite --artist-limit 20 --homepage-limit 20
 ```
+
+The production release deployment uses the committed `uv.lock` file with `uv sync --frozen`,
+so the worktree always runs the dependency graph validated for that tag.
 
 For development, install the committed systemd user units and enable the timer:
 

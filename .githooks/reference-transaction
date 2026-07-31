@@ -10,14 +10,14 @@ set -eu
 
 ZERO_OID="0000000000000000000000000000000000000000"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-SCRIPT="$REPO_ROOT/scripts/restart-production-service.sh"
+SCRIPT="$REPO_ROOT/scripts/deploy-production-release.sh"
 
 while read -r old_oid new_oid ref_name; do
   case "$ref_name" in
     refs/tags/*)
       if [ "$old_oid" = "$ZERO_OID" ] && [ "$new_oid" != "$ZERO_OID" ]; then
         if [ -x "$SCRIPT" ]; then
-          "$SCRIPT"
+          "$SCRIPT" "${ref_name#refs/tags/}"
         fi
         exit 0
       fi
