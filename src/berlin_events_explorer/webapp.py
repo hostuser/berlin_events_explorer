@@ -30,8 +30,8 @@ from typing import Annotated, AsyncIterator
 import math
 from urllib.parse import quote_plus, urlparse
 
-import anyio
 import httpx
+from anyio import to_thread
 from litestar import Litestar, Request, get, post
 from litestar.config.csrf import CSRFConfig
 from litestar.connection import ASGIConnection
@@ -882,7 +882,7 @@ def create_app(
                 media_type="text/html",
             )
 
-        return await anyio.to_thread.run_sync(_handle)
+        return await to_thread.run_sync(_handle)
 
     # Shared-path note: Litestar 2.24 mis-wraps a route when both of its
     # handlers use sync_to_thread=True, so the POST siblings of threaded GET
@@ -948,7 +948,7 @@ def create_app(
             )
             return Redirect(destination, status_code=303)
 
-        return await anyio.to_thread.run_sync(_handle)
+        return await to_thread.run_sync(_handle)
 
     @post(
         "/approvals/venues/{venue_id:str}/discover",
@@ -1010,7 +1010,7 @@ def create_app(
                 media_type="text/html",
             )
 
-        return await anyio.to_thread.run_sync(_handle)
+        return await to_thread.run_sync(_handle)
 
     @post("/approvals/artists/{artist_id:str}", guards=[_require_editor])
     async def approve_artist(
@@ -1060,7 +1060,7 @@ def create_app(
             )
             return Redirect(destination, status_code=303)
 
-        return await anyio.to_thread.run_sync(_handle)
+        return await to_thread.run_sync(_handle)
 
     @post(
         "/approvals/artists/{artist_id:str}/discover",
@@ -1162,7 +1162,7 @@ def create_app(
                 media_type="text/html",
             )
 
-        return await anyio.to_thread.run_sync(_handle)
+        return await to_thread.run_sync(_handle)
 
     @post("/settings", guards=[_require_editor])
     async def save_settings(
@@ -1242,7 +1242,7 @@ def create_app(
             store.set_setting("default_table_size", table_size)
             return Redirect("/settings?saved=1", status_code=303)
 
-        return await anyio.to_thread.run_sync(_handle)
+        return await to_thread.run_sync(_handle)
 
     @post("/settings/clear-database", sync_to_thread=True, guards=[_require_editor])
     def clear_database() -> Redirect | Response:
