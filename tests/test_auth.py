@@ -219,6 +219,7 @@ def test_login_page_renders(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert 'name="email"' in response.text
         assert 'name="password"' in response.text
+        assert 'href="/password-reset"' in response.text
 
 
 def test_logout_clears_the_session(tmp_path: Path) -> None:
@@ -468,6 +469,164 @@ def test_invite_acceptance_validates_the_password(tmp_path: Path) -> None:
                 invite_path,
                 data=payload,
                 headers=_csrf_headers(invitee),
+                follow_redirects=False,
+            )
+            assert response.status_code == 400, payload
+
+
+def _request_reset(client: TestClient, email: str):
+    """Submit the password-reset request form."""
+
+    client.get("/password-reset")
+    return client.post(
+        "/password-reset",
+        data={"email": email},
+        headers=_csrf_headers(client),
+        follow_redirects=False,
+    )
+
+
+def _reset_url_from_outbox() -> str:
+    """Extract the reset path from the most recent captured email."""
+
+    import re
+
+    from litestar_email.backends import InMemoryBackend
+
+    assert InMemoryBackend.outbox, "expected a reset email in the outbox"
+    match = re.search(
+        r"/password-reset/[A-Za-z0-9_-]+", InMemoryBackend.outbox[-1].body
+    )
+    assert match, InMemoryBackend.outbox[-1].body
+    return match.group(0)
+
+
+def test_reset_responses_never_reveal_account_existence(tmp_path: Path) -> None:
+    """Requesting a reset must answer identically for any address."""
+
+    from litestar_email.backends import InMemoryBackend
+
+    with TestClient(_app(tmp_path)) as client:
+        seed_user(client.app.state.store, email="e@example.test", role=UserRole.USER)
+
+        known = _request_reset(client, "e@example.test")
+        unknown = _request_reset(client, "nobody@example.test")
+
+        assert known.status_code == 200
+        assert unknown.status_code == 200
+        assert known.text == unknown.text
+        assert len(InMemoryBackend.outbox) == 1
+        assert InMemoryBackend.outbox[0].to == ["e@example.test"]
+
+
+def test_reset_flow_replaces_the_password(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        seed_user(client.app.state.store, email="e@example.test", role=UserRole.USER)
+        _request_reset(client, "e@example.test")
+        reset_path = _reset_url_from_outbox()
+
+        form_page = client.get(reset_path)
+        assert form_page.status_code == 200
+
+        response = client.post(
+            reset_path,
+            data={
+                "password": "a-brand-new-password",
+                "password_repeat": "a-brand-new-password",
+            },
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login?reset=1"
+        assert "password has been updated" in client.get("/login?reset=1").text
+
+        old = _login_post(client, "e@example.test", TEST_PASSWORD)
+        assert old.status_code == 400
+        new = _login_post(client, "e@example.test", "a-brand-new-password")
+        assert new.status_code == 303
+
+
+def test_reset_links_are_single_use(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        seed_user(client.app.state.store, email="e@example.test", role=UserRole.USER)
+        _request_reset(client, "e@example.test")
+        reset_path = _reset_url_from_outbox()
+        client.post(
+            reset_path,
+            data={
+                "password": "a-brand-new-password",
+                "password_repeat": "a-brand-new-password",
+            },
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+
+        assert "invalid or has expired" in client.get(reset_path).text
+        retry = client.post(
+            reset_path,
+            data={
+                "password": "another-new-password",
+                "password_repeat": "another-new-password",
+            },
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+        assert retry.status_code == 400
+
+
+def test_expired_reset_links_are_rejected(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from berlin_events_explorer import auth
+
+    with TestClient(_app(tmp_path)) as client:
+        user = seed_user(
+            client.app.state.store, email="e@example.test", role=UserRole.USER
+        )
+        raw, hashed = auth.generate_token()
+        client.app.state.store.create_auth_token(
+            purpose="password_reset",
+            token_hash=hashed,
+            email=user.email,
+            user_id=user.id,
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+
+        assert "invalid or has expired" in client.get(f"/password-reset/{raw}").text
+
+
+def test_reset_requests_for_inactive_accounts_send_nothing(tmp_path: Path) -> None:
+    from litestar_email.backends import InMemoryBackend
+
+    with TestClient(_app(tmp_path)) as client:
+        store = client.app.state.store
+        user = seed_user(store, email="e@example.test", role=UserRole.USER)
+        store.update_user(user.id, is_active=False)
+
+        response = _request_reset(client, "e@example.test")
+
+        assert response.status_code == 200
+        assert InMemoryBackend.outbox == []
+
+
+def test_reset_form_validates_the_password(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        seed_user(client.app.state.store, email="e@example.test", role=UserRole.USER)
+        _request_reset(client, "e@example.test")
+        reset_path = _reset_url_from_outbox()
+
+        for payload in (
+            {"password": "short", "password_repeat": "short"},
+            {
+                "password": "a-brand-new-password",
+                "password_repeat": "a-different-password",
+            },
+        ):
+            response = client.post(
+                reset_path,
+                data=payload,
+                headers=_csrf_headers(client),
                 follow_redirects=False,
             )
             assert response.status_code == 400, payload

@@ -48,6 +48,7 @@ from pydantic import ValidationError
 
 from berlin_events_explorer.auth import (
     INVITE_TTL,
+    RESET_TTL,
     ROLE_ORDER,
     SESSION_USER_KEY,
     SessionUserAuthMiddleware,
@@ -62,6 +63,7 @@ from berlin_events_explorer.auth import (
 from berlin_events_explorer.emails import (
     email_config_from_env,
     send_invite_email,
+    send_password_reset_email,
 )
 
 from berlin_events_explorer.artist_enrichment import (
@@ -213,11 +215,14 @@ def _render_login_page(
     next_target: str,
     *,
     error: str | None = None,
+    notice: str | None = None,
     csrf_token: str | None = None,
 ) -> str:
     """Render the account login form."""
 
     error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
+    if notice:
+        error_html += f'<p class="notice success">{escape(notice)}</p>'
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -243,7 +248,91 @@ def _render_login_page(
                  autocomplete="current-password" />
           <button type="submit">Log in</button>
         </form>
+        <p><a href="/password-reset">Forgot password?</a></p>
         <a class="back-link" href="/">← Back to events</a>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def _render_password_reset_request_page(
+    *,
+    confirmed: bool = False,
+    csrf_token: str | None = None,
+) -> str:
+    """Render the reset-request form, identically for every address."""
+
+    notice = (
+        '<p class="notice success">If an account exists for that address, '
+        "a password reset link has been sent.</p>"
+        if confirmed
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reset password · Berlin Events Explorer</title>
+    {theme.head_assets()}
+  </head>
+  <body class="login-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main">
+      <section class="card">
+        <h1>Reset password</h1>
+        <p>Enter your account's email address and we will send you a link to
+        choose a new password.</p>
+        {notice}
+        <form method="post" action="/password-reset">
+          {_csrf_input(csrf_token)}
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" required
+                 autocomplete="username" />
+          <button type="submit">Send reset link</button>
+        </form>
+        <a class="back-link" href="/login">← Back to login</a>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def _render_password_reset_form_page(
+    action_path: str,
+    *,
+    error: str | None = None,
+    csrf_token: str | None = None,
+) -> str:
+    """Render the new-password form behind one valid reset link."""
+
+    error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Choose a new password · Berlin Events Explorer</title>
+    {theme.head_assets()}
+  </head>
+  <body class="login-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main">
+      <section class="card">
+        <h1>Choose a new password</h1>
+        {error_html}
+        <form method="post" action="{escape(action_path, quote=True)}">
+          {_csrf_input(csrf_token)}
+          <label for="password">New password</label>
+          <input id="password" name="password" type="password" required
+                 minlength="10" autocomplete="new-password" autofocus />
+          <small class="hint">Use at least 10 characters.</small>
+          <label for="password-repeat">Repeat new password</label>
+          <input id="password-repeat" name="password_repeat" type="password"
+                 required minlength="10" autocomplete="new-password" />
+          <button type="submit">Update password</button>
+        </form>
       </section>
     </main>
   </body>
@@ -682,12 +771,18 @@ def create_app(
     def login_page(
         request: Request,
         next_target: Annotated[str | None, QueryParameter(query="next")] = None,
+        reset: str | None = None,
     ) -> Response:
         """Render the account login form."""
 
         return Response(
             content=_render_login_page(
                 _safe_next_target(next_target or "/"),
+                notice=(
+                    "Your password has been updated. Log in with your new password."
+                    if reset == "1"
+                    else None
+                ),
                 csrf_token=_csrf_token_from(request),
             ),
             media_type="text/html",
@@ -925,6 +1020,147 @@ def create_app(
             return result
         request.set_session({SESSION_USER_KEY: result.id})
         return Redirect("/", status_code=303)
+
+    @get("/password-reset", sync_to_thread=False)
+    def password_reset_request_page(request: Request) -> Response:
+        """Render the form on which anyone can request a reset link."""
+
+        return Response(
+            content=_render_password_reset_request_page(
+                csrf_token=_csrf_token_from(request)
+            ),
+            media_type="text/html",
+        )
+
+    @post("/password-reset", status_code=200)
+    async def request_password_reset(
+        request: Request,
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Response:
+        """Create a reset token when the address has an active account.
+
+        The response is byte-identical whether or not an account exists, so
+        this endpoint cannot be used to enumerate addresses.
+        """
+
+        raw_email = _form_string(data, "email")
+
+        def _prepare() -> tuple[str, datetime] | None:
+            try:
+                email = normalize_email(raw_email)
+            except ValueError:
+                return None
+            credentials = store.get_user_credentials(email)
+            if credentials is None or not credentials.user.is_active:
+                return None
+            store.delete_auth_tokens(
+                purpose="password_reset", user_id=credentials.user.id
+            )
+            raw, hashed = generate_token()
+            expires_at = datetime.now(UTC) + RESET_TTL
+            store.create_auth_token(
+                purpose="password_reset",
+                token_hash=hashed,
+                email=email,
+                user_id=credentials.user.id,
+                expires_at=expires_at,
+            )
+            return (raw, expires_at)
+
+        created = await to_thread.run_sync(_prepare)
+        if created is not None:
+            raw, expires_at = created
+            try:
+                await send_password_reset_email(
+                    email_config,
+                    to=normalize_email(raw_email),
+                    reset_url=_absolute_url(
+                        request, base_url, f"/password-reset/{raw}"
+                    ),
+                    expires_at=expires_at,
+                )
+            except EmailError:
+                logger.exception("Password reset email failed to send")
+        return Response(
+            content=_render_password_reset_request_page(
+                confirmed=True, csrf_token=_csrf_token_from(request)
+            ),
+            media_type="text/html",
+        )
+
+    # Shared-path note: async + thread pool, like the invite handlers.
+    @get("/password-reset/{token:str}")
+    async def password_reset_form(request: Request, token: FromPath[str]) -> Response:
+        """Show the new-password form behind one valid reset link."""
+
+        def _handle() -> Response:
+            token_record = _usable_token(token, purpose="password_reset")
+            if token_record is None:
+                return Response(
+                    content=_render_invalid_token_page(
+                        "This password reset link is invalid or has expired. "
+                        "Request a new one from the login page."
+                    ),
+                    media_type="text/html",
+                    status_code=404,
+                )
+            return Response(
+                content=_render_password_reset_form_page(
+                    f"/password-reset/{token}",
+                    csrf_token=_csrf_token_from(request),
+                ),
+                media_type="text/html",
+            )
+
+        return await to_thread.run_sync(_handle)
+
+    @post("/password-reset/{token:str}")
+    async def do_password_reset(
+        request: Request,
+        token: FromPath[str],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Replace the account password named by one valid reset token."""
+
+        def _handle() -> Redirect | Response:
+            token_record = _usable_token(token, purpose="password_reset")
+            if token_record is None or token_record.user_id is None:
+                return Response(
+                    content=_render_invalid_token_page(
+                        "This password reset link is invalid or has expired. "
+                        "Request a new one from the login page."
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            password = _form_string(data, "password")
+            repeat = _form_string(data, "password_repeat")
+            error: str | None = None
+            if len(password) < 10:
+                error = "Choose a password of at least 10 characters."
+            elif password != repeat:
+                error = "The passwords do not match."
+            if error is not None:
+                return Response(
+                    content=_render_password_reset_form_page(
+                        f"/password-reset/{token}",
+                        error=error,
+                        csrf_token=_csrf_token_from(request),
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            store.update_user(
+                token_record.user_id, password_hash=hash_password(password)
+            )
+            store.mark_auth_token_used(token_record.id)
+            return Redirect("/login?reset=1", status_code=303)
+
+        return await to_thread.run_sync(_handle)
 
     @get("/", sync_to_thread=True)
     def index(
@@ -1696,6 +1932,10 @@ def create_app(
             create_invite,
             invite_form,
             accept_invite,
+            password_reset_request_page,
+            request_password_reset,
+            password_reset_form,
+            do_password_reset,
             create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
         ],
         middleware=[
