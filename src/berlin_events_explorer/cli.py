@@ -22,6 +22,7 @@ from rich.table import Table
 from berlin_events_explorer.artist_enrichment import (
     DEFAULT_ARTIST_AUTO_APPROVE_THRESHOLD,
     DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
+    MAX_MUSICBRAINZ_FETCH_LIMIT,
     MusicBrainzArtistProvider,
     open_musicbrainz_cache,
 )
@@ -510,13 +511,16 @@ def artists_accept(database: Path, artist_id: str, musicbrainz_id: str) -> None:
     help="SQLite database path.",
 )
 @click.option(
-    "--artist-limit", type=click.IntRange(min=1, max=200), default=10, show_default=True
+    "--artist-limit",
+    type=click.IntRange(min=1, max=MAX_MUSICBRAINZ_FETCH_LIMIT),
+    default=None,
+    help="MusicBrainz artist fetches per worker run; defaults to the saved setting.",
 )
 @click.option(
     "--homepage-limit",
-    type=click.IntRange(min=1, max=50),
-    default=10,
-    show_default=True,
+    type=click.IntRange(min=1, max=MAX_MUSICBRAINZ_FETCH_LIMIT),
+    default=None,
+    help="MusicBrainz metadata fetches per worker run; defaults to the saved setting.",
 )
 @click.option(
     "--musicbrainz-cache-dir",
@@ -540,8 +544,8 @@ def artists_accept(database: Path, artist_id: str, musicbrainz_id: str) -> None:
 )
 def worker(
     database: Path,
-    artist_limit: int,
-    homepage_limit: int,
+    artist_limit: int | None,
+    homepage_limit: int | None,
     musicbrainz_cache_dir: Path | None,
     request_interval_seconds: float,
     auto_approve_threshold: float,

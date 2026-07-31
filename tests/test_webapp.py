@@ -828,7 +828,7 @@ def test_venue_detail_embeds_openstreetmap_when_coordinates_are_available(
 
 
 def test_settings_page_updates_auto_approval_threshold(tmp_path) -> None:
-    """The settings page persists a validated threshold for future syncs."""
+    """The settings page persists validated values for future syncs."""
 
     database = tmp_path / "events.sqlite"
     app = create_app(database, auto_approve_threshold=0.9)
@@ -837,16 +837,85 @@ def test_settings_page_updates_auto_approval_threshold(tmp_path) -> None:
         settings_response = client.get("/settings")
         save_response = client.post(
             "/settings",
-            data={"auto_approve_threshold": "0.94"},
+            data={
+                "auto_approve_threshold": "0.94",
+                "musicbrainz_request_interval_seconds": "1.5",
+                "musicbrainz_fetch_limit": "37",
+                "musicbrainz_metadata_fetch_limit": "41",
+            },
             follow_redirects=False,
         )
 
     assert 'href="/settings"' in index_response.text
     assert 'value="0.9"' in settings_response.text
+    assert 'name="musicbrainz_fetch_limit"' in settings_response.text
+    assert 'name="musicbrainz_metadata_fetch_limit"' in settings_response.text
+    assert 'min="1" max="10000"' in settings_response.text
     assert f"<strong>Version:</strong> {_get_app_version()}" in settings_response.text
     assert save_response.status_code == 303
     assert save_response.headers["location"] == "/settings?saved=1"
     assert EventStore(database).get_setting("auto_approve_threshold") == 0.94
+    assert (
+        EventStore(database).get_setting("musicbrainz_request_interval_seconds") == 1.5
+    )
+    assert EventStore(database).get_setting("musicbrainz_fetch_limit") == 37
+    assert EventStore(database).get_setting("musicbrainz_metadata_fetch_limit") == 41
+
+
+def test_development_settings_default_musicbrainz_fetch_limit_is_200(tmp_path) -> None:
+    """Development settings use the shared 200-fetch default."""
+
+    database = tmp_path / "events.sqlite"
+    with TestClient(create_app(database, environment="development")) as client:
+        response = client.get("/settings")
+
+    assert 'name="musicbrainz_fetch_limit"' in response.text
+    assert 'value="200"' in response.text
+    assert EventStore(database).get_setting("musicbrainz_fetch_limit") == 200
+    assert EventStore(database).get_setting("musicbrainz_metadata_fetch_limit") == 200
+
+
+def test_settings_page_rejects_musicbrainz_metadata_fetch_limit_outside_batch_range(
+    tmp_path,
+) -> None:
+    """Unsafe metadata batch sizes are rejected without changing saved settings."""
+
+    database = tmp_path / "events.sqlite"
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/settings",
+            data={
+                "auto_approve_threshold": "0.9",
+                "musicbrainz_request_interval_seconds": "1.1",
+                "musicbrainz_fetch_limit": "200",
+                "musicbrainz_metadata_fetch_limit": "10001",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "fetch count must be 1–10000" in response.text
+    assert EventStore(database).get_setting("musicbrainz_metadata_fetch_limit") == 200
+
+
+def test_settings_page_rejects_musicbrainz_fetch_limit_outside_batch_range(
+    tmp_path,
+) -> None:
+    """Unsafe MusicBrainz batch sizes are rejected without changing saved settings."""
+
+    database = tmp_path / "events.sqlite"
+    with TestClient(create_app(database)) as client:
+        response = client.post(
+            "/settings",
+            data={
+                "auto_approve_threshold": "0.9",
+                "musicbrainz_request_interval_seconds": "1.1",
+                "musicbrainz_fetch_limit": "10001",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "fetch count must be 1–10000" in response.text
+    assert EventStore(database).get_setting("musicbrainz_fetch_limit") == 200
 
 
 def test_settings_page_rejects_threshold_outside_probability_range(tmp_path) -> None:
@@ -1041,6 +1110,21 @@ def test_artist_approval_queue_and_verified_public_artist_page(
             retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
         )
     )
+    for field, value in (
+        ("spotify", "https://open.spotify.com/artist/abc123"),
+        ("youtube_music", "https://music.youtube.com/channel/UC123"),
+    ):
+        store.save_artist_metadata(
+            ArtistMetadata(
+                artist_id="die-arzte",
+                field=field,
+                value=value,
+                provider="musicbrainz",
+                source_url=candidate.source_url,
+                confidence=1.0,
+                retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+        )
 
     with TestClient(create_app(database)) as client:
         queue = client.get("/approvals?entity_type=artists")
@@ -1064,6 +1148,12 @@ def test_artist_approval_queue_and_verified_public_artist_page(
     assert public_after.status_code == 200
     assert "Die Ärzte" in public_after.text
     assert "https://www.bademeister.com/" in public_after.text
+    assert 'href="https://open.spotify.com/artist/abc123"' in public_after.text
+    assert 'href="https://music.youtube.com/channel/UC123"' in public_after.text
+    assert (
+        'href="https://www.youtube.com/results?search_query=Die+%C3%84rzte"'
+        in public_after.text
+    )
     assert 'href="/approvals/artists/die-arzte"' in public_after.text
     assert public_after.text.count("Find suggestions") == 0
     assert suggestion_response.status_code == 200

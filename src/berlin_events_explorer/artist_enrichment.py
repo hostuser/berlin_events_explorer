@@ -9,7 +9,7 @@ import random
 import sqlite3
 import time
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import diskcache
 import httpx
@@ -25,6 +25,8 @@ MUSICBRAINZ_USER_AGENT = (
     "(https://github.com/hostuser/berlin_events_explorer)"
 )
 DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS = 1.1
+DEFAULT_MUSICBRAINZ_FETCH_LIMIT = 200
+MAX_MUSICBRAINZ_FETCH_LIMIT = 10000
 DEFAULT_ARTIST_AUTO_APPROVE_THRESHOLD = 1.0
 DEFAULT_MUSICBRAINZ_CACHE_DIR = (
     Path.home() / ".cache" / "berlin-events-explorer" / "musicbrainz"
@@ -38,6 +40,17 @@ class ArtistHomepage:
     """An official homepage relation supplied by MusicBrainz."""
 
     url: str
+    source_url: str
+    retrieved_at: datetime
+
+
+@dataclass(frozen=True)
+class ArtistLinks:
+    """Public platform links discovered from one MusicBrainz URL response."""
+
+    official_homepage: str | None
+    spotify: str | None
+    youtube_music: str | None
     source_url: str
     retrieved_at: datetime
 
@@ -190,6 +203,24 @@ class MusicBrainzArtistProvider:
     ) -> ArtistHomepage | None:
         """Return a cached verified artist's MusicBrainz official homepage, if listed."""
 
+        links = self.discover_artist_links(artist, now=now, refresh=refresh)
+        if links.official_homepage is None:
+            return None
+        return ArtistHomepage(
+            url=links.official_homepage,
+            source_url=links.source_url,
+            retrieved_at=links.retrieved_at,
+        )
+
+    def discover_artist_links(
+        self,
+        artist: ArtistRecord,
+        *,
+        now: datetime | None = None,
+        refresh: bool = False,
+    ) -> ArtistLinks:
+        """Return cached official and streaming URLs for a verified artist."""
+
         if artist.musicbrainz_id is None:
             raise ValueError("artist must have a verified MusicBrainz ID")
         cache_key = _homepage_cache_key(artist.musicbrainz_id)
@@ -201,7 +232,7 @@ class MusicBrainzArtistProvider:
         if isinstance(cached, dict) and isinstance(cached.get("payload"), dict):
             retrieved_at = _parse_cached_datetime(cached.get("retrieved_at"))
             if retrieved_at is not None:
-                return _homepage_from_payload(
+                return _artist_links_from_payload(
                     artist.musicbrainz_id, cached["payload"], retrieved_at
                 )
 
@@ -211,7 +242,7 @@ class MusicBrainzArtistProvider:
                 cache_key,
                 {"payload": payload, "retrieved_at": retrieved_at.isoformat()},
             )
-        return _homepage_from_payload(artist.musicbrainz_id, payload, retrieved_at)
+        return _artist_links_from_payload(artist.musicbrainz_id, payload, retrieved_at)
 
     def _request_homepage_with_retry(
         self, artist: ArtistRecord
@@ -379,26 +410,43 @@ def _homepage_cache_key(musicbrainz_id: str) -> str:
     return f"{_HOMEPAGE_CACHE_PREFIX}:{musicbrainz_id}"
 
 
-def _homepage_from_payload(
+def _artist_links_from_payload(
     musicbrainz_id: str, payload: dict[str, Any], retrieved_at: datetime
-) -> ArtistHomepage | None:
-    """Select only a valid official-homepage relation from MusicBrainz data."""
+) -> ArtistLinks:
+    """Select trusted homepage, Spotify, and YouTube Music relations."""
 
+    official_homepage: str | None = None
+    spotify: str | None = None
+    youtube_music: str | None = None
     for relation in payload.get("relations", []):
-        if (
-            not isinstance(relation, dict)
-            or relation.get("type") != "official homepage"
-        ):
+        if not isinstance(relation, dict):
             continue
         url = relation.get("url")
         resource = url.get("resource") if isinstance(url, dict) else None
-        if isinstance(resource, str) and resource.startswith(("https://", "http://")):
-            return ArtistHomepage(
-                url=resource,
-                source_url=f"https://musicbrainz.org/artist/{quote(musicbrainz_id, safe='')}",
-                retrieved_at=retrieved_at,
-            )
-    return None
+        if not isinstance(resource, str):
+            continue
+        parsed = urlparse(resource)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        hostname = (parsed.hostname or "").lower()
+        if relation.get("type") == "official homepage" and official_homepage is None:
+            official_homepage = resource
+        elif (
+            spotify is None
+            and hostname in {"open.spotify.com", "spotify.com"}
+            and parsed.path.startswith("/artist/")
+        ):
+            spotify = resource
+        elif youtube_music is None and hostname == "music.youtube.com":
+            youtube_music = resource
+
+    return ArtistLinks(
+        official_homepage=official_homepage,
+        spotify=spotify,
+        youtube_music=youtube_music,
+        source_url=f"https://musicbrainz.org/artist/{quote(musicbrainz_id, safe='')}",
+        retrieved_at=retrieved_at,
+    )
 
 
 def _parse_cached_datetime(value: object) -> datetime | None:

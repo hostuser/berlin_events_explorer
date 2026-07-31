@@ -16,7 +16,13 @@ from berlin_events_explorer.models import ArtistRecord
 
 
 def _artist() -> ArtistRecord:
-    return ArtistRecord(id="die-arzte", name="Die Ärzte", normalized_name="die ärzte")
+    return ArtistRecord(
+        id="die-arzte",
+        name="Die Ärzte",
+        normalized_name="die ärzte",
+        musicbrainz_id="11111111-1111-1111-1111-111111111111",
+        musicbrainz_url="https://musicbrainz.org/artist/11111111-1111-1111-1111-111111111111",
+    )
 
 
 def test_musicbrainz_provider_uses_identified_json_request_and_caches_response(
@@ -59,6 +65,40 @@ def test_musicbrainz_provider_uses_identified_json_request_and_caches_response(
     assert first[0].display_name == "Die Ärzte"
     assert first[0].provider_score == 100
     assert first == second
+
+
+def test_musicbrainz_provider_extracts_streaming_platform_links(tmp_path) -> None:
+    """MusicBrainz URL relations expose Spotify and YouTube Music links when present."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "relations": [
+                    {
+                        "type": "streaming music",
+                        "url": {"resource": "https://open.spotify.com/artist/abc123"},
+                    },
+                    {
+                        "type": "streaming music",
+                        "url": {"resource": "https://music.youtube.com/channel/UC123"},
+                    },
+                    {
+                        "type": "social network",
+                        "url": {"resource": "https://example.com/not-a-platform"},
+                    },
+                ]
+            },
+        )
+
+    with diskcache.Cache(tmp_path / "cache") as cache:
+        provider = MusicBrainzArtistProvider(
+            httpx.Client(transport=httpx.MockTransport(handler)), cache=cache
+        )
+        links = provider.discover_artist_links(_artist())
+
+    assert links.spotify == "https://open.spotify.com/artist/abc123"
+    assert links.youtube_music == "https://music.youtube.com/channel/UC123"
 
 
 def test_musicbrainz_provider_rejects_interval_below_public_limit() -> None:

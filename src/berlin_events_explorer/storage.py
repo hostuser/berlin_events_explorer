@@ -23,6 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     delete,
+    distinct,
     func,
     insert,
     select,
@@ -671,9 +672,25 @@ class EventStore:
     ) -> list[ArtistRecord]:
         """Return bounded verified artists without one provider metadata check."""
 
-        checked_artist_ids = select(artist_metadata_table.c.artist_id).where(
-            artist_metadata_table.c.field == field,
-            artist_metadata_table.c.provider == provider,
+        return self.list_verified_artists_missing_any_metadata(
+            (field,), provider, limit=limit
+        )
+
+    def list_verified_artists_missing_any_metadata(
+        self, fields: tuple[str, ...], provider: str, *, limit: int
+    ) -> list[ArtistRecord]:
+        """Return verified artists missing at least one field from a provider."""
+
+        if not fields:
+            return []
+        checked_artist_ids = (
+            select(artist_metadata_table.c.artist_id)
+            .where(
+                artist_metadata_table.c.field.in_(fields),
+                artist_metadata_table.c.provider == provider,
+            )
+            .group_by(artist_metadata_table.c.artist_id)
+            .having(func.count(distinct(artist_metadata_table.c.field)) >= len(fields))
         )
         with self.engine.connect() as connection:
             rows = connection.execute(
@@ -689,11 +706,25 @@ class EventStore:
             return [_artist_from_row(row) for row in rows]
 
     def count_verified_artists_missing_metadata(self, field: str, provider: str) -> int:
-        """Count verified artists still lacking a provider metadata check."""
+        """Count verified artists still lacking one provider metadata check."""
 
-        checked_artist_ids = select(artist_metadata_table.c.artist_id).where(
-            artist_metadata_table.c.field == field,
-            artist_metadata_table.c.provider == provider,
+        return self.count_verified_artists_missing_any_metadata((field,), provider)
+
+    def count_verified_artists_missing_any_metadata(
+        self, fields: tuple[str, ...], provider: str
+    ) -> int:
+        """Count verified artists missing at least one field from a provider."""
+
+        if not fields:
+            return 0
+        checked_artist_ids = (
+            select(artist_metadata_table.c.artist_id)
+            .where(
+                artist_metadata_table.c.field.in_(fields),
+                artist_metadata_table.c.provider == provider,
+            )
+            .group_by(artist_metadata_table.c.artist_id)
+            .having(func.count(distinct(artist_metadata_table.c.field)) >= len(fields))
         )
         with self.engine.connect() as connection:
             return int(
@@ -722,6 +753,30 @@ class EventStore:
                 .order_by(artist_metadata_table.c.id.desc())
             ).scalar_one_or_none()
         return value if isinstance(value, str) else None
+
+    def get_artist_external_links(self, artist_id: str) -> dict[str, str]:
+        """Return available MusicBrainz artist platform URLs by their stable field names."""
+
+        fields = {"official_homepage", "spotify", "youtube_music"}
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    artist_metadata_table.c.field, artist_metadata_table.c.value_json
+                )
+                .where(
+                    artist_metadata_table.c.artist_id == artist_id,
+                    artist_metadata_table.c.provider == "musicbrainz",
+                    artist_metadata_table.c.field.in_(fields),
+                )
+                .order_by(artist_metadata_table.c.id.desc())
+            )
+        links: dict[str, str] = {}
+        for row in rows:
+            field = row.field
+            value = row.value_json
+            if field not in links and isinstance(value, str) and value:
+                links[field] = value
+        return links
 
     def save_artist_metadata(
         self, artist_metadata: ArtistMetadata, *, connection: Connection | None = None

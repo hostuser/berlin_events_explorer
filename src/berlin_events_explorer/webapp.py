@@ -24,7 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import AsyncIterator
 import math
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 import httpx
 from litestar import Litestar, Request, get, post
@@ -33,7 +33,9 @@ from litestar.response import Redirect, Response, Stream
 from pydantic import ValidationError
 
 from berlin_events_explorer.artist_enrichment import (
+    DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
     DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
+    MAX_MUSICBRAINZ_FETCH_LIMIT,
     MusicBrainzArtistProvider,
     open_musicbrainz_cache,
 )
@@ -343,6 +345,15 @@ def create_app(
             "musicbrainz_request_interval_seconds",
             DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
         )
+    if store.get_setting("musicbrainz_fetch_limit") is None:
+        store.set_setting(
+            "musicbrainz_fetch_limit",
+            DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
+        )
+    if store.get_setting("musicbrainz_metadata_fetch_limit") is None:
+        store.set_setting(
+            "musicbrainz_metadata_fetch_limit", DEFAULT_MUSICBRAINZ_FETCH_LIMIT
+        )
 
     @get("/", sync_to_thread=True)
     def index(
@@ -445,6 +456,7 @@ def create_app(
                 artist,
                 store.list_events_for_artist(artist_id),
                 homepage=store.get_artist_official_homepage(artist_id),
+                external_links=store.get_artist_external_links(artist_id),
             ),
             media_type="text/html",
         )
@@ -708,6 +720,10 @@ def create_app(
             content=_render_settings_page(
                 threshold=_get_auto_approve_threshold(store, auto_approve_threshold),
                 musicbrainz_request_interval=_get_musicbrainz_request_interval(store),
+                musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
+                musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
+                    store
+                ),
                 environment=environment,
                 version=_get_app_version(),
                 saved=saved == "1",
@@ -723,6 +739,10 @@ def create_app(
         form = await request.form()
         raw_threshold = _form_string(form, "auto_approve_threshold")
         raw_interval = _form_string(form, "musicbrainz_request_interval_seconds")
+        raw_fetch_limit = _form_string(form, "musicbrainz_fetch_limit")
+        raw_metadata_fetch_limit = _form_string(
+            form, "musicbrainz_metadata_fetch_limit"
+        )
         try:
             threshold = float(raw_threshold)
             interval = (
@@ -730,9 +750,23 @@ def create_app(
                 if raw_interval
                 else _get_musicbrainz_request_interval(store)
             )
+            fetch_limit = (
+                int(raw_fetch_limit)
+                if raw_fetch_limit
+                else _get_musicbrainz_fetch_limit(store)
+            )
+            metadata_fetch_limit = (
+                int(raw_metadata_fetch_limit)
+                if raw_metadata_fetch_limit
+                else _get_musicbrainz_metadata_fetch_limit(store)
+            )
             if not math.isfinite(threshold) or not 0 <= threshold <= 1:
                 raise ValueError
             if not math.isfinite(interval) or not 1.0 <= interval <= 300:
+                raise ValueError
+            if not 1 <= fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+                raise ValueError
+            if not 1 <= metadata_fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
                 raise ValueError
         except ValueError:
             return Response(
@@ -740,14 +774,23 @@ def create_app(
                     threshold=_get_auto_approve_threshold(
                         store, auto_approve_threshold
                     ),
+                    musicbrainz_request_interval=_get_musicbrainz_request_interval(
+                        store
+                    ),
+                    musicbrainz_fetch_limit=_get_musicbrainz_fetch_limit(store),
+                    musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
+                        store
+                    ),
                     environment=environment,
-                    error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds.",
+                    error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000.",
                 ),
                 media_type="text/html",
                 status_code=400,
             )
         store.set_setting("auto_approve_threshold", threshold)
         store.set_setting("musicbrainz_request_interval_seconds", interval)
+        store.set_setting("musicbrainz_fetch_limit", fetch_limit)
+        store.set_setting("musicbrainz_metadata_fetch_limit", metadata_fetch_limit)
         return Redirect("/settings?saved=1", status_code=303)
 
     @post("/settings/clear-database", sync_to_thread=True)
@@ -838,10 +881,38 @@ def _get_musicbrainz_request_interval(store: EventStore) -> float:
     return DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS
 
 
+def _get_musicbrainz_fetch_limit(store: EventStore) -> int:
+    """Return persisted safe MusicBrainz batch size, falling back to the default."""
+
+    configured = store.get_setting("musicbrainz_fetch_limit")
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and 1 <= configured <= MAX_MUSICBRAINZ_FETCH_LIMIT
+    ):
+        return configured
+    return DEFAULT_MUSICBRAINZ_FETCH_LIMIT
+
+
+def _get_musicbrainz_metadata_fetch_limit(store: EventStore) -> int:
+    """Return persisted safe MusicBrainz metadata batch size."""
+
+    configured = store.get_setting("musicbrainz_metadata_fetch_limit")
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and 1 <= configured <= MAX_MUSICBRAINZ_FETCH_LIMIT
+    ):
+        return configured
+    return DEFAULT_MUSICBRAINZ_FETCH_LIMIT
+
+
 def _render_settings_page(
     *,
     threshold: float,
     musicbrainz_request_interval: float = DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
+    musicbrainz_fetch_limit: int = DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
+    musicbrainz_metadata_fetch_limit: int = DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
     environment: str,
     version: str | None = None,
     saved: bool = False,
@@ -935,6 +1006,14 @@ def _render_settings_page(
             <input id="musicbrainz-interval" name="musicbrainz_request_interval_seconds" type="number"
               min="1" max="300" step="0.1" required value="{musicbrainz_request_interval:g}" />
             <small class="hint">Public MusicBrainz access requires at least one second between requests.</small>
+            <label for="musicbrainz-fetch-limit">MusicBrainz artist fetches per worker run</label>
+            <input id="musicbrainz-fetch-limit" name="musicbrainz_fetch_limit" type="number"
+              min="1" max="10000" step="1" required value="{musicbrainz_fetch_limit}" />
+            <small class="hint">Limit the number of unresolved artists checked in one background worker run.</small>
+            <label for="musicbrainz-metadata-fetch-limit">MusicBrainz metadata fetches per worker run</label>
+            <input id="musicbrainz-metadata-fetch-limit" name="musicbrainz_metadata_fetch_limit" type="number"
+              min="1" max="10000" step="1" required value="{musicbrainz_metadata_fetch_limit}" />
+            <small class="hint">Limit the number of verified artists checked for missing metadata in one background worker run.</small>
             <br /><button type="submit">Save settings</button>
           </form>
         </section>
@@ -1210,9 +1289,15 @@ def _render_artist_approval_form(
 
 
 def _render_artist_detail_page(
-    artist: ArtistRecord, events: list[Event], *, homepage: str | None = None
+    artist: ArtistRecord,
+    events: list[Event],
+    *,
+    homepage: str | None = None,
+    external_links: dict[str, str] | None = None,
 ) -> str:
     """Render verified canonical artist metadata and associated events."""
+
+    external_links = external_links or {}
 
     identity = (
         f'<a href="{escape(artist.musicbrainz_url, quote=True)}" target="_blank" rel="noopener noreferrer">MusicBrainz</a>'
@@ -1224,6 +1309,28 @@ def _render_artist_detail_page(
         'rel="noopener noreferrer">Official homepage</a>'
         if homepage
         else ""
+    )
+    spotify_link = (
+        f'<a href="{escape(external_links["spotify"], quote=True)}" target="_blank" '
+        'rel="noopener noreferrer">Spotify</a>'
+        if external_links.get("spotify")
+        else ""
+    )
+    youtube_music_link = (
+        f'<a href="{escape(external_links["youtube_music"], quote=True)}" target="_blank" '
+        'rel="noopener noreferrer">YouTube Music</a>'
+        if external_links.get("youtube_music")
+        else ""
+    )
+    youtube_search_url = "https://www.youtube.com/results?search_query=" + quote_plus(
+        artist.name
+    )
+    youtube_search_link = (
+        f'<a href="{escape(youtube_search_url, quote=True)}" target="_blank" '
+        'rel="noopener noreferrer">Search on YouTube</a>'
+    )
+    platform_links = " · ".join(
+        link for link in (spotify_link, youtube_music_link, youtube_search_link) if link
     )
     details = (
         " · ".join(
@@ -1255,11 +1362,14 @@ main {{ max-width:760px; margin:0 auto; padding:2rem 1.25rem 3rem; }} a {{ color
   color:#fff; font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }}
 .action-button.secondary {{ border-color:#cbd5e1; background:#e2e8f0; color:#0f172a; }}
 .action-button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
+.artist-links {{ display:flex; flex-wrap:wrap; gap:.35rem .75rem; }}
 @media (max-width:560px) {{ .detail-header {{ display:block; }} .detail-header .action-button {{ margin-top:.9rem; }} }}
 </style></head><body><main><p><a href="/">← Back to events</a></p><section class="card">
 <div class="detail-header"><div><p>Berlin artist</p><h1>{escape(artist.name)}</h1></div>
 <a class="action-button" href="/approvals/artists/{escape(artist.id, quote=True)}">Edit</a></div>
-<p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p><p>{identity}</p>
+<p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p>
+<p class="artist-links"><strong>Listen &amp; watch:</strong> {platform_links}</p>
+<p>{identity}</p>
 </section><section><h2>Events</h2><ul>{event_items}</ul></section></main></body></html>"""
 
 

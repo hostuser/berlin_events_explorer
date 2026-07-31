@@ -8,6 +8,7 @@ from typing import Protocol
 
 from berlin_events_explorer.artist_enrichment import (
     ArtistDiscoveryError,
+    MAX_MUSICBRAINZ_FETCH_LIMIT,
     auto_approval_candidate,
 )
 from berlin_events_explorer.models import ArtistCandidate, ArtistRecord, ArtistStatus
@@ -44,8 +45,11 @@ def enrich_artists(
 ) -> ArtistEnrichmentResult:
     """Discover candidates for a small batch and queue all non-safe matches."""
 
-    if not 1 <= limit <= 200:
-        raise ValueError("artist enrichment limit must be between 1 and 200")
+    if not 1 <= limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+        raise ValueError(
+            "artist enrichment limit must be between 1 and "
+            f"{MAX_MUSICBRAINZ_FETCH_LIMIT}"
+        )
     artists = [
         artist
         for artist in store.list_artists()

@@ -10,7 +10,9 @@ from typing import Any
 import httpx
 
 from berlin_events_explorer.artist_enrichment import (
+    DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
     DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
+    MAX_MUSICBRAINZ_FETCH_LIMIT,
     MusicBrainzArtistProvider,
     open_musicbrainz_cache,
 )
@@ -23,6 +25,36 @@ from berlin_events_explorer.venue_enrichment import DEFAULT_AUTO_APPROVE_THRESHO
 from berlin_events_explorer.venue_ingestion import sync_source_and_ingest_venues
 
 WorkerPhase = Callable[[], dict[str, Any]]
+
+
+def _get_musicbrainz_fetch_limit(
+    store: EventStore, fallback: int = DEFAULT_MUSICBRAINZ_FETCH_LIMIT
+) -> int:
+    """Return a persisted safe MusicBrainz artist batch size."""
+
+    configured = store.get_setting("musicbrainz_fetch_limit")
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and 1 <= configured <= MAX_MUSICBRAINZ_FETCH_LIMIT
+    ):
+        return configured
+    return fallback
+
+
+def _get_musicbrainz_metadata_fetch_limit(
+    store: EventStore, fallback: int = DEFAULT_MUSICBRAINZ_FETCH_LIMIT
+) -> int:
+    """Return a persisted safe MusicBrainz metadata batch size."""
+
+    configured = store.get_setting("musicbrainz_metadata_fetch_limit")
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and 1 <= configured <= MAX_MUSICBRAINZ_FETCH_LIMIT
+    ):
+        return configured
+    return fallback
 
 
 def run_worker(
@@ -58,8 +90,8 @@ def run_worker(
 def run_default_worker(
     store: EventStore,
     *,
-    artist_limit: int,
-    homepage_limit: int,
+    artist_limit: int | None,
+    homepage_limit: int | None,
     musicbrainz_cache_dir: Path | None = None,
     musicbrainz_request_interval_seconds: float = (
         DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS
@@ -67,6 +99,17 @@ def run_default_worker(
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
 ) -> WorkerRun:
     """Run the production worker pipeline using safe bounded provider batches."""
+
+    artist_limit = (
+        artist_limit
+        if artist_limit is not None
+        else _get_musicbrainz_fetch_limit(store)
+    )
+    homepage_limit = (
+        homepage_limit
+        if homepage_limit is not None
+        else _get_musicbrainz_metadata_fetch_limit(store)
+    )
 
     with (
         httpx.Client(timeout=30.0, follow_redirects=True) as client,

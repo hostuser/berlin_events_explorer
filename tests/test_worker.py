@@ -8,7 +8,12 @@ from click.testing import CliRunner
 
 from berlin_events_explorer.cli import cli
 from berlin_events_explorer.storage import EventStore
-from berlin_events_explorer.worker import run_worker
+from berlin_events_explorer.worker import (
+    DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
+    _get_musicbrainz_metadata_fetch_limit,
+    _get_musicbrainz_fetch_limit,
+    run_worker,
+)
 
 
 def test_development_worker_units_serialize_timer_invocations() -> None:
@@ -88,18 +93,35 @@ def test_worker_command_exposes_bounded_batch_options() -> None:
 
     assert result.exit_code == 0, result.output
     assert "--artist-limit" in result.output
-    assert "1<=x<=200" in result.output
+    assert "1<=x<=10000" in result.output
     assert "--homepage-limit" in result.output
     assert "--database" in result.output
 
 
-def test_production_worker_uses_a_200_artist_backlog_batch() -> None:
-    """Production should process the initial artist backlog at 200 per run."""
+def test_worker_reads_musicbrainz_fetch_limit_from_persisted_settings(tmp_path) -> None:
+    """The worker uses the saved MusicBrainz batch size and rejects unsafe values."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.set_setting("musicbrainz_fetch_limit", 37)
+    assert _get_musicbrainz_fetch_limit(store) == 37
+
+    store.set_setting("musicbrainz_fetch_limit", 10000)
+    assert _get_musicbrainz_fetch_limit(store) == 10000
+
+    store.set_setting("musicbrainz_fetch_limit", 10001)
+    assert _get_musicbrainz_fetch_limit(store) == DEFAULT_MUSICBRAINZ_FETCH_LIMIT
+
+    store.set_setting("musicbrainz_metadata_fetch_limit", 37)
+    assert _get_musicbrainz_metadata_fetch_limit(store) == 37
+
+
+def test_production_worker_uses_the_persisted_artist_backlog_batch() -> None:
+    """Production should let the database setting control the artist batch size."""
 
     root = Path(__file__).parents[1]
     service = (root / "deploy" / "berlin-events-worker-production.service").read_text()
 
-    assert "--artist-limit 200" in service
+    assert "--artist-limit" not in service
 
 
 def test_run_worker_records_successful_phases(tmp_path) -> None:
