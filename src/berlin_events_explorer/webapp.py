@@ -611,14 +611,16 @@ def create_app(
             normalized_page_size = _normalize_page_size(
                 page_size or _get_default_table_size(store)
             )
-            content = _render_venues_content(
-                summaries,
-                page=page,
-                page_size=normalized_page_size,
-                search=search,
-            )
             if fragment:
-                return _render_tab_fragment(content, event_count=0)
+                return _render_tab_fragment(
+                    _render_venues_content(
+                        summaries,
+                        page=page,
+                        page_size=normalized_page_size,
+                        search=search,
+                    ),
+                    event_count=0,
+                )
             return Response(
                 content=_render_venues_page(
                     summaries,
@@ -638,15 +640,17 @@ def create_app(
             normalized_entity_type = (
                 entity_type if entity_type in {"all", "venues", "artists"} else "all"
             )
-            content = _render_approval_content(
-                pending_venues,
-                candidate_counts,
-                pending_artists,
-                artist_candidate_counts,
-                entity_type=normalized_entity_type,
-            )
             if fragment:
-                return _render_tab_fragment(content, event_count=0)
+                return _render_tab_fragment(
+                    _render_approval_content(
+                        pending_venues,
+                        candidate_counts,
+                        pending_artists,
+                        artist_candidate_counts,
+                        entity_type=normalized_entity_type,
+                    ),
+                    event_count=0,
+                )
             return Response(
                 content=_render_approval_queue(
                     pending_venues,
@@ -676,19 +680,6 @@ def create_app(
             recent_days=recent_days,
             search=search,
         )
-        html = render_events_page(
-            paged_events,
-            total_count=filtered_count,
-            page=current_page,
-            page_size=normalized_page_size,
-            total_pages=total_pages,
-            tab=tab,
-            recent_days=normalized_days,
-            search=search.strip(),
-            venue_ids_by_event=venue_ids_by_event,
-            artist_ids_by_event_performer=artist_ids_by_event_performer,
-            csrf_token=_csrf_token_from(request),
-        )
         if fragment:
             return _render_tab_fragment(
                 _render_event_content(
@@ -705,7 +696,22 @@ def create_app(
                 ),
                 event_count=filtered_count,
             )
-        return Response(content=html, media_type="text/html")
+        return Response(
+            content=render_events_page(
+                paged_events,
+                total_count=filtered_count,
+                page=current_page,
+                page_size=normalized_page_size,
+                total_pages=total_pages,
+                tab=tab,
+                recent_days=normalized_days,
+                search=search.strip(),
+                venue_ids_by_event=venue_ids_by_event,
+                artist_ids_by_event_performer=artist_ids_by_event_performer,
+                csrf_token=_csrf_token_from(request),
+            ),
+            media_type="text/html",
+        )
 
     @get("/events/search", sync_to_thread=True)
     def search_events(
@@ -1641,64 +1647,6 @@ def _approval_nav() -> str:
     )
 
 
-def _legacy_render_approval_queue(
-    venues: list[VenueRecord],
-    venue_candidate_counts: dict[str, int],
-    artists: list[ArtistRecord],
-    artist_candidate_counts: dict[str, int],
-    *,
-    entity_type: str,
-) -> str:
-    """Render a filterable queue of venues and artists needing review."""
-
-    venue_rows = "".join(
-        "<tr>"
-        '<td><span class="status">Venue</span></td>'
-        f'<td><a href="/approvals/venues/{escape(venue.id)}">{escape(venue.name)}</a></td>'
-        f"<td>{escape(venue.status.value.replace('_', ' ').title())}</td>"
-        f"<td>{venue_candidate_counts.get(venue.id, 0)} "
-        f"{'suggestion' if venue_candidate_counts.get(venue.id, 0) == 1 else 'suggestions'}</td>"
-        "</tr>"
-        for venue in venues
-    )
-    artist_rows = "".join(
-        "<tr>"
-        '<td><span class="status">Artist</span></td>'
-        f'<td><a href="/approvals/artists/{escape(artist.id)}">{escape(artist.name)}</a></td>'
-        f"<td>{escape(artist.status.value.replace('_', ' ').title())}</td>"
-        f"<td>{artist_candidate_counts.get(artist.id, 0)} "
-        f"{'suggestion' if artist_candidate_counts.get(artist.id, 0) == 1 else 'suggestions'}</td>"
-        "</tr>"
-        for artist in artists
-    )
-    rows = (
-        venue_rows
-        if entity_type == "venues"
-        else artist_rows
-        if entity_type == "artists"
-        else venue_rows + artist_rows
-    )
-    empty = '<p class="muted">Nothing is waiting for approval.</p>' if not rows else ""
-    tabs = "".join(
-        f'<a class="tab{" active" if selected else ""}" href="/approvals?entity_type={value}">{label}</a>'
-        for value, label, selected in (
-            ("all", "All", entity_type == "all"),
-            ("venues", "Venues", entity_type == "venues"),
-            ("artists", "Artists", entity_type == "artists"),
-        )
-    )
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Awaiting approval · Berlin Events Explorer</title><style>{_approval_styles()}</style></head>
-<body><main><p class="kicker">Editorial queue</p><h1>Awaiting approval</h1>
-<p class="muted">Review suggested metadata before it appears as verified information.</p>
-{_approval_nav()}<nav class="tabs" aria-label="Entity filters">{tabs}</nav>
-<section class="card">{empty}<table><thead><tr><th>Type</th><th>Name</th>
-<th>Status</th><th>Suggestions</th></tr></thead><tbody>{rows}</tbody></table></section>
-</main></body></html>"""
-
-
 def _venue_field(
     name: str, label: str, value: str | None, *, wide: bool = False
 ) -> str:
@@ -1940,400 +1888,6 @@ main {{ max-width:760px; margin:0 auto; padding:2rem 1.25rem 3rem; }} a {{ color
 </section><section><h2>Events</h2><ul>{event_items}</ul></section></main></body></html>"""
 
 
-def _legacy_render_events_page(
-    events: list[Event],
-    *,
-    total_count: int,
-    page: int,
-    page_size: int,
-    total_pages: int,
-    tab: str = "upcoming",
-    recent_days: int = 7,
-    search: str = "",
-    venue_ids_by_event: dict[str, str] | None = None,
-    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
-) -> str:
-    """Render a full HTML page with the provided events."""
-
-    styles = (
-        """ :root {
-        --surface: #ffffff;
-        --surface-soft: #f3f5f9;
-        --text: #0f172a;
-        --muted: #64748b;
-        --primary: #3b82f6;
-        --line: #d5dbe8;
-        --danger: #dc2626;
-        --radius-lg: 0.85rem;
-      }
-
-      body {
-        margin: 0;
-        min-height: 100vh;
-        font-family: Inter, "Segoe UI", Roboto, sans-serif;
-        background: linear-gradient(180deg, #f6f7fb 0%, #eef2ff 45%, #f8fafc 100%);
-        color: var(--text);
-      }
-
-      .events-app {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 2rem 1.25rem 3rem;
-      }
-
-      .events-header {
-        margin-bottom: 1rem;
-      }
-
-      .page-kicker {
-        display: inline-block;
-        margin: 0 0 0.3rem;
-        font-size: 0.85rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--primary);
-        font-weight: 650;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: clamp(1.5rem, 2.6vw, 2.15rem);
-        line-height: 1.2;
-      }
-
-      .toolbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-      }
-
-      .toolbar-actions {
-        display: flex;
-        align-items: center;
-        gap: 0.55rem;
-      }
-
-      .settings-link {
-        display: inline-flex;
-        align-items: center;
-        min-height: 2.35rem;
-        padding: 0.45rem 0.75rem;
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        color: var(--text);
-        background: var(--surface);
-        text-decoration: none;
-        font-weight: 600;
-      }
-
-      .settings-link:hover {
-        border-color: #93c5fd;
-        background: #eff6ff;
-      }
-
-      .sync-button {
-        border: 1px solid transparent;
-        padding: 0.5rem 1rem;
-        border-radius: var(--radius-lg);
-        background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
-        color: #ffffff;
-        font-weight: 600;
-        cursor: pointer;
-        transition: transform 120ms ease, box-shadow 120ms ease;
-      }
-
-      .sync-button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
-      }
-
-      .sync-button:disabled {
-        filter: grayscale(0.25);
-        cursor: not-allowed;
-        box-shadow: none;
-        transform: none;
-      }
-
-      .sync-error {
-        color: var(--danger);
-        min-height: 1.1rem;
-        font-weight: 500;
-      }
-
-      .sync-progress {
-        display: grid;
-        gap: 0.45rem;
-        margin: 0.75rem 0;
-        color: var(--muted);
-        font-size: 0.92rem;
-      }
-
-      .sync-progress p {
-        margin: 0;
-      }
-
-      .sync-progress progress {
-        width: min(34rem, 100%);
-        height: 0.65rem;
-        accent-color: var(--accent);
-      }
-
-      .tabs {
-        display: flex;
-        gap: 0.35rem;
-        align-items: center;
-        margin: 1.25rem 0 0.75rem;
-        border-bottom: 1px solid var(--line);
-      }
-
-      .tab {
-        color: var(--muted);
-        padding: 0.65rem 0.85rem;
-        text-decoration: none;
-        border-bottom: 3px solid transparent;
-        font-weight: 600;
-      }
-
-      .tab:hover,
-      .tab.active {
-        color: var(--primary);
-        border-bottom-color: var(--primary);
-      }
-
-      .recent-settings {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        margin: 0 0 0.75rem;
-        color: var(--muted);
-        font-size: 0.9rem;
-      }
-
-      .recent-settings select {
-        border: 1px solid var(--line);
-        border-radius: 0.45rem;
-        padding: 0.35rem 0.5rem;
-        background: var(--surface);
-        color: var(--text);
-      }
-
-      #events-panel {
-        margin-top: 0.5rem;
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: var(--radius-lg);
-        padding: 0.9rem;
-        box-shadow: 0 16px 40px rgba(15, 23, 42, 0.07);
-      }
-
-      .meta {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin: 0.25rem 0 0.75rem;
-      }
-
-      .pagination {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin: 0.4rem 0 1rem;
-      }
-
-      .pagination-link {
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        color: var(--text);
-        text-decoration: none;
-        padding: 0.35rem 0.85rem;
-        font-size: 0.9rem;
-        background: var(--surface-soft);
-      }
-
-      .pagination-link:hover {
-        background: #dbeafe;
-      }
-
-      .pagination-link.disabled {
-        color: #94a3b8;
-        pointer-events: none;
-        background: #f8fafc;
-      }
-
-      .pagination-page {
-        color: var(--muted);
-        font-size: 0.9rem;
-      }
-
-      .filter-bar {
-        display: flex;
-        align-items: end;
-        justify-content: space-between;
-        gap: 1rem;
-        flex-wrap: wrap;
-        margin: 0 0 0.8rem;
-      }
-
-      .filter-label {
-        display: grid;
-        gap: 0.35rem;
-        color: #334155;
-        font-size: 0.85rem;
-        font-weight: 700;
-        width: min(28rem, 100%);
-      }
-
-      .filter-input {
-        width: 100%;
-        padding: 0.72rem 0.8rem;
-        border: 1px solid #b9c2d0;
-        border-radius: 0.65rem;
-        color: var(--text);
-        background: var(--surface);
-        font: inherit;
-      }
-
-      .filter-input:focus {
-        outline: 3px solid #bfdbfe;
-        outline-offset: 2px;
-      }
-
-      .filter-wrapper {
-        position: relative;
-      }
-
-      .filter-clear {
-        position: absolute;
-        right: 0.5rem;
-        top: 50%;
-        transform: translateY(-50%);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 1.4rem;
-        height: 1.4rem;
-        border: 0;
-        border-radius: 50%;
-        background: #e2e8f0;
-        color: #475569;
-        font-size: 0.95rem;
-        line-height: 1;
-        cursor: pointer;
-        padding: 0;
-      }
-
-      .filter-clear:hover {
-        background: #cbd5e1;
-      }
-
-      .result-count {
-        color: var(--muted);
-        font-size: 0.9rem;
-        margin: 0 0 0.2rem;
-      }
-
-"""
-        + _event_table_styles()
-        + """
-
-      @media (max-width: 720px) {
-        .events-app {
-          padding: 1rem 0.75rem 2rem;
-        }
-
-        .toolbar {
-          align-items: stretch;
-        }
-
-      }"""
-    )
-
-    events_html = _render_events_panel(
-        events,
-        total_count=total_count,
-        page=page,
-        page_size=page_size,
-        total_pages=total_pages,
-        tab=tab,
-        recent_days=recent_days,
-        search=search,
-        venue_ids_by_event=venue_ids_by_event,
-        artist_ids_by_event_performer=artist_ids_by_event_performer,
-    )
-    signals = escape(
-        json.dumps(
-            {
-                "eventCount": total_count,
-                "eventSearch": search,
-                "eventTab": tab,
-                "eventRecentDays": recent_days,
-                "eventPageSize": page_size,
-                "isSyncing": False,
-                "syncError": None,
-            }
-        ),
-        quote=True,
-    )
-
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Berlin Events Explorer</title>
-    <script type="module" src="{DATASTAR_SCRIPT}"></script>
-    <style>
-{styles}
-    </style>
-  </head>
-  <body>
-    <main class="events-app" data-signals='{signals}'>
-      <header class="events-header">
-        <p class="page-kicker">Berlin Events</p>
-        <div class="toolbar">
-          <h1 data-text="'Berlin Events Explorer (' + $eventCount + ')'">Berlin Events Explorer</h1>
-          <div class="toolbar-actions">
-            <button
-              type="button"
-              class="sync-button"
-              data-attr="{{'disabled': $isSyncing}}"
-              data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
-              data-on:click="@post('sync?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">
-              Sync now
-            </button>
-            <a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>
-          </div>
-        </div>
-      </header>
-      <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
-      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>
-      {_render_tabs(tab=tab, recent_days=recent_days, search=search)}
-      <section class="filter-bar" aria-labelledby="event-filter-label">
-        <div class="filter-label" id="event-filter-label">
-          <label for="event-filter">Filter events</label>
-          <div class="filter-wrapper">
-            <input class="filter-input" id="event-filter" type="search" name="search"
-              data-bind="eventSearch"
-              data-on:input__debounce_150ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
-              value="{escape(search, quote=True)}"
-              placeholder="Search by title, venue, or performers" autocomplete="off" />
-            <button class="filter-clear" id="event-filter-clear" type="button"
-              aria-label="Clear filter"
-              data-attr="{{'hidden': $eventSearch.length === 0}}"
-              data-on:click="$eventSearch = ''; history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
-          </div>
-        </div>
-        <p class="result-count" id="event-result-count" aria-live="polite"
-          data-text="$eventCount + ' events'">{total_count} events</p>
-      </section>
-      {events_html}
-    </main>
-  </body>
-</html>
-"""
-
-
 def _render_date_events_page(
     target_date: date,
     events: list[Event],
@@ -2390,160 +1944,6 @@ def _render_date_events_page(
         {event_table}
       </section>
     </main>
-  </body>
-</html>"""
-
-
-def _legacy_render_venues_page(
-    summaries: list[VenueSummary], *, table_size: int = DEFAULT_TABLE_SIZE
-) -> str:
-    """Render the venue catalog and its client-side name filter."""
-
-    total_venues = len(summaries)
-    displayed_summaries = summaries[: max(1, table_size)]
-    rows: list[str] = []
-    for summary in displayed_summaries:
-        venue = summary.venue
-        district = venue.district or "Not listed"
-        search_text = f"{venue.name} {district}".casefold()
-        event_label = "event" if summary.event_count == 1 else "events"
-        rows.append(
-            '<tr class="venue-row" data-venue-row '
-            f'data-venue-href="/venues/{escape(venue.id, quote=True)}" '
-            f'data-venue-search="{escape(search_text, quote=True)}" '
-            'tabindex="0" role="link">'
-            f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">'
-            f"{escape(venue.name)}</a></td>"
-            f'<td data-label="District">{escape(district)}</td>'
-            f'<td data-label="Events">{summary.event_count} {event_label}</td>'
-            "</tr>"
-        )
-    table_rows = "".join(rows)
-    empty_table = (
-        '<p class="empty-state">No venues have been synced yet.</p>'
-        if not summaries
-        else ""
-    )
-    hidden_count = total_venues - len(displayed_summaries)
-    shown_text = (
-        f"Showing {len(displayed_summaries)} of {total_venues} venues"
-        if hidden_count > 0
-        else f"{total_venues} venues"
-    )
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Venues · Berlin Events Explorer</title>
-    <style>
-      :root {{ --surface:#fff; --soft:#f3f5f9; --text:#0f172a; --muted:#64748b;
-        --primary:#2563eb; --line:#d5dbe8; }}
-      * {{ box-sizing:border-box; }}
-      body {{ margin:0; color:var(--text);
-        font-family:Inter,"Segoe UI",Roboto,sans-serif;
-        background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%); }}
-      main {{ max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }}
-      a {{ color:var(--primary); }}
-      .page-kicker {{ margin:0 0 .3rem; color:var(--primary); font-size:.82rem;
-        font-weight:700; letter-spacing:.08em; text-transform:uppercase; }}
-      h1 {{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
-      .intro {{ color:var(--muted); margin:.55rem 0 1.2rem; }}
-      .tabs {{ display:flex; gap:.35rem; align-items:center; margin:1.25rem 0 .75rem;
-        border-bottom:1px solid var(--line); overflow-x:auto; }}
-      .tab {{ color:var(--muted); padding:.65rem .85rem; text-decoration:none;
-        border-bottom:3px solid transparent; font-weight:600; white-space:nowrap; }}
-      .tab:hover,.tab.active {{ color:var(--primary); border-bottom-color:var(--primary); }}
-      .filter-bar {{ display:flex; align-items:end; justify-content:space-between; gap:1rem;
-        flex-wrap:wrap; margin:1.25rem 0 .8rem; }}
-      .filter-label {{ display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
-        width:min(28rem,100%); }}
-      .filter-input {{ width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
-        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }}
-      .filter-input:focus,.venue-row:focus,a:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
-      .result-count {{ color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }}
-      .catalog {{ background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
-        padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }}
-      table {{ width:100%; border-collapse:collapse; font-size:.95rem; }}
-      th,td {{ text-align:left; vertical-align:top; padding:.7rem .55rem; border-bottom:1px solid var(--line); }}
-      th {{ color:#334155; font-weight:650; }}
-      .venue-row {{ cursor:pointer; }}
-      .venue-row:hover td,.venue-row:focus td {{ background:#f8fafc; }}
-      tbody tr:last-child td {{ border-bottom:none; }}
-      .empty-state {{ color:var(--muted); margin:.35rem 0; }}
-      @media (max-width:720px) {{
-        main {{ padding:1rem .75rem 2rem; }}
-        table,thead,tbody,tr,th,td {{ display:block; }}
-        thead {{ display:none; }}
-        tbody tr {{ margin-bottom:.7rem; border:1px solid var(--line); border-radius:.7rem; overflow:hidden; }}
-        tbody tr td {{ padding:.45rem .65rem; border-bottom:1px solid var(--line); }}
-        tbody tr td::before {{ content:attr(data-label); display:block; color:var(--muted);
-          font-size:.78rem; margin-bottom:.2rem; letter-spacing:.04em; text-transform:uppercase; }}
-        tbody tr td:last-child {{ border-bottom:none; }}
-      }}
-    </style>
-  </head>
-  <body>
-    <main>
-      <p class="page-kicker">Berlin Events</p>
-      <h1>Venues</h1>
-      <p class="intro">Browse every venue in the catalog and the events currently associated with it.</p>
-      <nav class="tabs" aria-label="Application views">
-        <a class="tab" href="/?tab=recent">Recently added</a>
-        <a class="tab" href="/?tab=upcoming">Upcoming</a>
-        <a class="tab active" href="/venues" aria-current="page">Venues</a>
-        <a class="tab" href="/approvals">Awaiting approval</a>
-      </nav>
-      <section class="filter-bar" aria-labelledby="venue-filter-label">
-        <label class="filter-label" id="venue-filter-label" for="venue-filter">
-          Filter venues
-          <input class="filter-input" id="venue-filter" type="search"
-            placeholder="Search by venue or district" autocomplete="off" />
-        </label>
-        <p class="result-count" id="venue-result-count" aria-live="polite">{shown_text}</p>
-      </section>
-      <section class="catalog" aria-label="Venue list">
-        {empty_table}
-        <p class="empty-state" id="venue-no-match" hidden>No venues match that filter.</p>
-        <table>
-          <thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead>
-          <tbody>{table_rows}</tbody>
-        </table>
-      </section>
-    </main>
-    <script>
-      (() => {{
-        const input = document.querySelector("#venue-filter");
-        const rows = [...document.querySelectorAll("[data-venue-row]")];
-        const count = document.querySelector("#venue-result-count");
-        const noMatch = document.querySelector("#venue-no-match");
-        const pluralize = (number) => `${{number}} venue${{number === 1 ? "" : "s"}}`;
-        const render = () => {{
-          const query = input.value.trim().toLocaleLowerCase();
-          let visible = 0;
-          for (const row of rows) {{
-            const matches = row.dataset.venueSearch.toLocaleLowerCase().includes(query);
-            row.hidden = !matches;
-            if (matches) visible += 1;
-          }}
-          count.textContent = pluralize(visible);
-          noMatch.hidden = visible !== 0;
-        }};
-        input.addEventListener("input", render);
-        for (const row of rows) {{
-          row.addEventListener("click", (event) => {{
-            if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref);
-          }});
-          row.addEventListener("keydown", (event) => {{
-            if (event.key === "Enter" || event.key === " ") {{
-              event.preventDefault();
-              window.location.assign(row.dataset.venueHref);
-            }}
-          }});
-        }}
-        render();
-      }})();
-    </script>
   </body>
 </html>"""
 
@@ -3373,6 +2773,12 @@ def _fragment_url(href: str) -> str:
     return f"{href}{separator}fragment=1"
 
 
+def _js_string_escape(value: str) -> str:
+    """Escape a value for embedding inside a single-quoted JS string literal."""
+
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _in_place_navigation_action(
     href: str, *, app_view: str, event_tab: str | None = None
 ) -> str:
@@ -3381,9 +2787,9 @@ def _in_place_navigation_action(
     event_tab_assignment = f" $eventTab = '{event_tab}';" if event_tab else ""
     return (
         "evt.preventDefault(); "
-        f"history.pushState(null, '', '{href}'); "
+        f"history.pushState(null, '', '{_js_string_escape(href)}'); "
         f"$appView = '{app_view}';"
-        f"{event_tab_assignment} @get('{_fragment_url(href)}')"
+        f"{event_tab_assignment} @get('{_js_string_escape(_fragment_url(href))}')"
     )
 
 
@@ -3405,8 +2811,9 @@ def _render_in_place_link(
         event_tab=event_tab,
     )
     return (
-        f'<a class="{class_name}" href="{escape(href, quote=True)}"{current} {attributes}'
-        f'data-on:click="{action}">{label}</a>'
+        f'<a class="{escape(class_name, quote=True)}" '
+        f'href="{escape(href, quote=True)}"{current} {attributes}'
+        f'data-on:click="{escape(action, quote=True)}">{escape(label)}</a>'
     )
 
 

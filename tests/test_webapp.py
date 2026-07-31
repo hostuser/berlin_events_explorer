@@ -188,7 +188,7 @@ def test_render_events_page_renders_table_rows() -> None:
     assert "requestSubmit" not in page
     assert "data-signals" in page
     assert "Page 1 of 2" in page
-    assert "?page=2&page_size=25" in page
+    assert "?page=2&amp;page_size=25" in page
     assert "Recently added" in page
     assert "Upcoming" in page
     assert '<a class="date-link" href="/dates/2026-07-01">2026-07-01</a>' in page
@@ -543,12 +543,16 @@ def test_application_navigation_writes_the_canonical_url(tmp_path) -> None:
         response = client.get("/?tab=upcoming&page_size=10")
 
     assert response.status_code == 200
-    assert "history.pushState(null, '', '/?tab=venues&page_size=10')" in response.text
     assert (
-        "history.pushState(null, '', '/?tab=approvals&page_size=10')" in response.text
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=venues&amp;page_size=10&#x27;)"
+        in response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=approvals&amp;page_size=10&#x27;)"
+        in response.text
+    )
+    assert (
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=recent&amp;recent_days=7&amp;page_size=10&#x27;)"
         in response.text
     )
     assert (
@@ -565,19 +569,19 @@ def test_event_search_stays_scoped_to_the_active_event_tab(tmp_path) -> None:
         upcoming_response = client.get("/?tab=upcoming&search=house&page_size=10")
 
     assert (
-        "history.pushState(null, '', '/?tab=upcoming&recent_days=7&page_size=10')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=upcoming&amp;recent_days=7&amp;page_size=10&#x27;)"
         in recent_response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=recent&amp;recent_days=7&amp;page_size=10&#x27;)"
         in upcoming_response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=upcoming&recent_days=7&page_size=10&search=house')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=upcoming&amp;recent_days=7&amp;page_size=10&amp;search=house&#x27;)"
         not in recent_response.text
     )
     assert (
-        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10&search=house')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?tab=recent&amp;recent_days=7&amp;page_size=10&amp;search=house&#x27;)"
         not in upcoming_response.text
     )
 
@@ -615,10 +619,13 @@ def test_event_pagination_uses_in_place_history_navigation() -> None:
     )
 
     assert (
-        "history.pushState(null, '', '/?page=2&page_size=1&tab=upcoming&recent_days=7')"
+        "history.pushState(null, &#x27;&#x27;, &#x27;/?page=2&amp;page_size=1&amp;tab=upcoming&amp;recent_days=7&#x27;)"
         in page
     )
-    assert "@get('/?page=2&page_size=1&tab=upcoming&recent_days=7&fragment=1')" in page
+    assert (
+        "@get(&#x27;/?page=2&amp;page_size=1&amp;tab=upcoming&amp;recent_days=7&amp;fragment=1&#x27;)"
+        in page
+    )
 
 
 def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
@@ -2116,3 +2123,18 @@ def test_datastar_is_served_from_the_same_origin(tmp_path) -> None:
     assert 'src="/static/datastar.js"' in page
     assert asset.status_code == 200
     assert asset.text.startswith("// Datastar v1.0.0-RC.7")
+
+
+def test_in_place_links_escape_attribute_breakouts() -> None:
+    """Hostile characters in link parts must not escape their HTML context."""
+
+    html = webapp._render_in_place_link(
+        '/x?q="><script>alert(1)</script>',
+        "<b>Label</b>",
+        class_name="tab",
+        app_view="venues",
+    )
+
+    assert "<script>" not in html
+    assert "<b>" not in html
+    assert 'q="><' not in html

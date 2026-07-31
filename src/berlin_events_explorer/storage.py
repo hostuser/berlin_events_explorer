@@ -35,6 +35,8 @@ from sqlalchemy import (
     update,
 )
 
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from berlin_events_explorer.migrations import migrate_database
 from berlin_events_explorer.models import (
     ArtistCandidate,
@@ -394,23 +396,18 @@ class EventStore:
     def set_setting(self, key: str, value: Any) -> None:
         """Persist one application setting as a JSON-compatible value."""
 
-        now = datetime.now(timezone.utc)
+        statement = sqlite_insert(settings_table).values(
+            key=key, value_json=value, updated_at=datetime.now(timezone.utc)
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[settings_table.c.key],
+            set_={
+                "value_json": statement.excluded.value_json,
+                "updated_at": statement.excluded.updated_at,
+            },
+        )
         with self.engine.begin() as connection:
-            existing = connection.execute(
-                select(settings_table.c.key).where(settings_table.c.key == key)
-            ).scalar_one_or_none()
-            if existing is None:
-                connection.execute(
-                    insert(settings_table).values(
-                        key=key, value_json=value, updated_at=now
-                    )
-                )
-            else:
-                connection.execute(
-                    update(settings_table)
-                    .where(settings_table.c.key == key)
-                    .values(value_json=value, updated_at=now)
-                )
+            connection.execute(statement)
 
     def start_worker_run(self) -> WorkerRun:
         """Record a worker invocation before it begins its first external phase."""
@@ -558,19 +555,17 @@ class EventStore:
             self._save_snapshot(connection, values)
 
     def _save_snapshot(self, connection: Connection, values: dict[str, Any]) -> None:
-        existing = connection.execute(
-            select(snapshots_table.c.provider).where(
-                snapshots_table.c.provider == values["provider"]
+        statement = sqlite_insert(snapshots_table).values(**values)
+        connection.execute(
+            statement.on_conflict_do_update(
+                index_elements=[snapshots_table.c.provider],
+                set_={
+                    key: getattr(statement.excluded, key)
+                    for key in values
+                    if key != "provider"
+                },
             )
-        ).scalar_one_or_none()
-        if existing is None:
-            connection.execute(insert(snapshots_table).values(**values))
-        else:
-            connection.execute(
-                update(snapshots_table)
-                .where(snapshots_table.c.provider == values["provider"])
-                .values(**values)
-            )
+        )
 
     def upsert(
         self,
