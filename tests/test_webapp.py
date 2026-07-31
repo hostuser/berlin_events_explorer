@@ -2043,3 +2043,43 @@ def test_settings_page_uses_cached_app_version(tmp_path, monkeypatch) -> None:
         assert calls["count"] == first_calls
     finally:
         webapp._cached_app_version.cache_clear()
+
+
+def test_approvals_tab_avoids_per_row_candidate_queries(tmp_path, monkeypatch) -> None:
+    """The approval queue must not run one candidate query per pending row."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(3):
+        store.upsert_venue(
+            VenueRecord(
+                id=f"venue-{index}",
+                name=f"Venue {index}",
+                normalized_name=f"venue {index}",
+            )
+        )
+    per_row_calls: list[str] = []
+    original_venue = EventStore.list_venue_candidates
+    original_artist = EventStore.list_artist_candidates
+    monkeypatch.setattr(
+        EventStore,
+        "list_venue_candidates",
+        lambda self, venue_id: (
+            per_row_calls.append(venue_id) or original_venue(self, venue_id)
+        ),
+    )
+    monkeypatch.setattr(
+        EventStore,
+        "list_artist_candidates",
+        lambda self, artist_id: (
+            per_row_calls.append(artist_id) or original_artist(self, artist_id)
+        ),
+    )
+
+    with TestClient(create_app(database, sync_interval=None)) as client:
+        _login(client)
+        response = client.get("/?tab=approvals")
+
+    assert response.status_code == 200
+    assert "Venue 0" in response.text
+    assert per_row_calls == []

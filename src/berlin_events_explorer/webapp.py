@@ -615,29 +615,10 @@ def create_app(
             )
 
         if tab == "approvals":
-            pending_venues = [
-                venue
-                for venue in store.list_venues()
-                if venue.status
-                not in {
-                    VenueStatus.VERIFIED,
-                    VenueStatus.NOT_A_VENUE,
-                    VenueStatus.REJECTED,
-                }
-            ]
-            candidate_counts = {
-                venue.id: len(store.list_venue_candidates(venue.id))
-                for venue in pending_venues
-            }
-            pending_artists = [
-                artist
-                for artist in store.list_artists()
-                if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
-            ]
-            artist_candidate_counts = {
-                artist.id: len(store.list_artist_candidates(artist.id))
-                for artist in pending_artists
-            }
+            pending_venues = store.list_pending_venues()
+            candidate_counts = store.count_venue_candidates_by_venue()
+            pending_artists = store.list_pending_artists()
+            artist_candidate_counts = store.count_artist_candidates_by_artist()
             normalized_entity_type = (
                 entity_type if entity_type in {"all", "venues", "artists"} else "all"
             )
@@ -2797,32 +2778,15 @@ def _perform_sync_stream(
             ),
         )
     elif view == "approvals":
-        pending_venues = [
-            venue
-            for venue in store.list_venues()
-            if venue.status
-            not in {VenueStatus.VERIFIED, VenueStatus.NOT_A_VENUE, VenueStatus.REJECTED}
-        ]
-        pending_artists = [
-            artist
-            for artist in store.list_artists()
-            if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
-        ]
         yield _sse_event(
             "datastar-patch-elements",
             "elements "
             + _render_tab_content_element(
                 _render_approval_content(
-                    pending_venues,
-                    {
-                        venue.id: len(store.list_venue_candidates(venue.id))
-                        for venue in pending_venues
-                    },
-                    pending_artists,
-                    {
-                        artist.id: len(store.list_artist_candidates(artist.id))
-                        for artist in pending_artists
-                    },
+                    store.list_pending_venues(),
+                    store.count_venue_candidates_by_venue(),
+                    store.list_pending_artists(),
+                    store.count_artist_candidates_by_artist(),
                     entity_type="all",
                 )
             ),
@@ -2868,14 +2832,7 @@ def _verified_artist_ids_by_event_performer(
 ) -> dict[tuple[str, int], str]:
     """Return artist links only for identities verified for public display."""
 
-    links = store.get_artist_ids_for_event_performers(event_ids)
-    artists = {artist.id: artist for artist in store.list_artists()}
-    return {
-        key: artist_id
-        for key, artist_id in links.items()
-        if artists.get(artist_id) is not None
-        and artists[artist_id].status is ArtistStatus.VERIFIED
-    }
+    return store.get_artist_ids_for_event_performers(event_ids, only_verified=True)
 
 
 def _paginate_events(

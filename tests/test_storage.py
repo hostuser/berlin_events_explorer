@@ -539,3 +539,124 @@ def test_update_preserves_original_first_seen_timestamp(tmp_path) -> None:
     assert result.action == "updated"
     assert stored.title == "Changed Title"
     assert stored.first_seen_at == first_seen
+
+
+def test_candidate_counts_come_from_single_grouped_queries(tmp_path) -> None:
+    """Approval queues need one count query, not one query per pending row."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.upsert_venue(_venue())
+    for osm_id in ("1", "2"):
+        store.record_venue_candidates(
+            [
+                VenueCandidate(
+                    venue_id="berghain",
+                    provider="nominatim",
+                    source_url=f"https://www.openstreetmap.org/node/{osm_id}",
+                    osm_type="node",
+                    osm_id=osm_id,
+                    display_name=f"Berghain {osm_id}",
+                    confidence=0.9,
+                    retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+                )
+                for osm_id in ("1", "2")
+            ]
+        )
+    store.upsert_artist(
+        ArtistRecord(id="die-arzte", name="Die Ärzte", normalized_name="die ärzte")
+    )
+    store.record_artist_candidates(
+        [
+            ArtistCandidate(
+                artist_id="die-arzte",
+                provider="musicbrainz",
+                source_url="https://musicbrainz.org/artist/1",
+                musicbrainz_id="11111111-1111-1111-1111-111111111111",
+                display_name="Die Ärzte",
+                confidence=1.0,
+                retrieved_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+        ]
+    )
+
+    assert store.count_venue_candidates_by_venue() == {"berghain": 2}
+    assert store.count_artist_candidates_by_artist() == {"die-arzte": 1}
+
+
+def test_pending_entities_are_filtered_in_sql(tmp_path) -> None:
+    """Pending review listings should not load and filter full catalogs."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    for venue_id, status in (
+        ("a-unresolved", VenueStatus.UNRESOLVED),
+        ("b-candidate", VenueStatus.CANDIDATE),
+        ("c-verified", VenueStatus.VERIFIED),
+        ("d-rejected", VenueStatus.REJECTED),
+        ("e-not-a-venue", VenueStatus.NOT_A_VENUE),
+    ):
+        store.upsert_venue(
+            VenueRecord(
+                id=venue_id,
+                name=venue_id.title(),
+                normalized_name=venue_id,
+                status=status,
+            )
+        )
+    for artist_id, artist_status in (
+        ("x-unresolved", ArtistStatus.UNRESOLVED),
+        ("y-candidate", ArtistStatus.CANDIDATE),
+        ("z-verified", ArtistStatus.VERIFIED),
+    ):
+        store.upsert_artist(
+            ArtistRecord(
+                id=artist_id,
+                name=artist_id.title(),
+                normalized_name=artist_id,
+                status=artist_status,
+            )
+        )
+
+    assert [venue.id for venue in store.list_pending_venues()] == [
+        "a-unresolved",
+        "b-candidate",
+    ]
+    assert [artist.id for artist in store.list_pending_artists()] == [
+        "x-unresolved",
+        "y-candidate",
+    ]
+
+
+def test_event_performer_links_can_be_limited_to_verified_artists(tmp_path) -> None:
+    """Public listings need verified links without loading the artist catalog."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    event = _event()
+    store.upsert(event)
+    store.upsert_artist(
+        ArtistRecord(
+            id="verified-artist",
+            name="Verified",
+            normalized_name="verified",
+            status=ArtistStatus.VERIFIED,
+        )
+    )
+    store.upsert_artist(
+        ArtistRecord(
+            id="unresolved-artist",
+            name="Unresolved",
+            normalized_name="unresolved",
+        )
+    )
+    store.link_event_artist(event.id, 1, "verified-artist", source_name="Verified")
+    store.link_event_artist(event.id, 2, "unresolved-artist", source_name="Unresolved")
+
+    all_links = store.get_artist_ids_for_event_performers([event.id])
+    verified_links = store.get_artist_ids_for_event_performers(
+        [event.id], only_verified=True
+    )
+
+    assert all_links == {
+        (event.id, 1): "verified-artist",
+        (event.id, 2): "unresolved-artist",
+    }
+    assert verified_links == {(event.id, 1): "verified-artist"}

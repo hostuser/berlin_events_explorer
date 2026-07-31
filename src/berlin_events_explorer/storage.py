@@ -1010,6 +1010,65 @@ class EventStore:
             ).mappings()
             return [_artist_candidate_from_row(row) for row in rows]
 
+    def count_venue_candidates_by_venue(self) -> dict[str, int]:
+        """Return cached candidate counts for all venues in one query."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(venue_candidates_table.c.venue_id, func.count()).group_by(
+                    venue_candidates_table.c.venue_id
+                )
+            )
+            return {row[0]: int(row[1]) for row in rows}
+
+    def count_artist_candidates_by_artist(self) -> dict[str, int]:
+        """Return cached candidate counts for all artists in one query."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(artist_candidates_table.c.artist_id, func.count()).group_by(
+                    artist_candidates_table.c.artist_id
+                )
+            )
+            return {row[0]: int(row[1]) for row in rows}
+
+    def list_pending_venues(self) -> list[VenueRecord]:
+        """Return venues awaiting editorial review, filtered in SQL."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(venues_table)
+                .where(
+                    venues_table.c.status.not_in(
+                        [
+                            VenueStatus.VERIFIED.value,
+                            VenueStatus.NOT_A_VENUE.value,
+                            VenueStatus.REJECTED.value,
+                        ]
+                    )
+                )
+                .order_by(venues_table.c.name)
+            ).mappings()
+            return [_venue_from_row(row) for row in rows]
+
+    def list_pending_artists(self) -> list[ArtistRecord]:
+        """Return artists awaiting editorial review, filtered in SQL."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(artists_table)
+                .where(
+                    artists_table.c.status.in_(
+                        [
+                            ArtistStatus.UNRESOLVED.value,
+                            ArtistStatus.CANDIDATE.value,
+                        ]
+                    )
+                )
+                .order_by(artists_table.c.name)
+            ).mappings()
+            return [_artist_from_row(row) for row in rows]
+
     def select_artist_candidate(
         self, artist_id: str, provider: str, musicbrainz_id: str
     ) -> ArtistRecord:
@@ -1111,24 +1170,25 @@ class EventStore:
                 )
 
     def get_artist_ids_for_event_performers(
-        self, event_ids: list[str]
+        self, event_ids: list[str], *, only_verified: bool = False
     ) -> dict[tuple[str, int], str]:
         """Return artist IDs keyed by event and source billing order."""
 
         if not event_ids:
             return {}
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(
-                    event_artists_table.c.event_id,
-                    event_artists_table.c.billing_order,
-                    event_artists_table.c.artist_id,
-                )
-                .join(
-                    artists_table, event_artists_table.c.artist_id == artists_table.c.id
-                )
-                .where(event_artists_table.c.event_id.in_(event_ids))
+        query = (
+            select(
+                event_artists_table.c.event_id,
+                event_artists_table.c.billing_order,
+                event_artists_table.c.artist_id,
             )
+            .join(artists_table, event_artists_table.c.artist_id == artists_table.c.id)
+            .where(event_artists_table.c.event_id.in_(event_ids))
+        )
+        if only_verified:
+            query = query.where(artists_table.c.status == ArtistStatus.VERIFIED.value)
+        with self.engine.connect() as connection:
+            rows = connection.execute(query)
             return {(row.event_id, row.billing_order): row.artist_id for row in rows}
 
     def list_events_for_artist(self, artist_id: str) -> list[Event]:
