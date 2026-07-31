@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 from queue import Queue
 from threading import Thread
 from collections.abc import Mapping
@@ -35,6 +36,7 @@ from berlin_events_explorer.artist_enrichment import (
     MusicBrainzArtistProvider,
     open_musicbrainz_cache,
 )
+from berlin_events_explorer._version import version as PACKAGE_VERSION
 from berlin_events_explorer.models import (
     ArtistCandidate,
     ArtistRecord,
@@ -68,6 +70,35 @@ DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
 logger = logging.getLogger(__name__)
+
+
+def _run_git(*args: str) -> str | None:
+    """Return trimmed output from Git in the current source checkout."""
+
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def _get_app_version() -> str:
+    """Return the release tag or commit identity for the running application."""
+
+    tag = _run_git("describe", "--tags", "--exact-match", "HEAD")
+    if tag:
+        return tag
+    commit = _run_git("rev-parse", "--short=12", "HEAD")
+    if commit:
+        return f"git:{commit}"
+    return PACKAGE_VERSION
 
 
 def _form_string(form: Mapping[str, object], key: str) -> str:
@@ -550,6 +581,7 @@ def create_app(
                 threshold=_get_auto_approve_threshold(store, auto_approve_threshold),
                 musicbrainz_request_interval=_get_musicbrainz_request_interval(store),
                 environment=environment,
+                version=_get_app_version(),
                 saved=saved == "1",
                 cleared=cleared == "1",
             ),
@@ -681,12 +713,14 @@ def _render_settings_page(
     threshold: float,
     musicbrainz_request_interval: float = DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
     environment: str,
+    version: str | None = None,
     saved: bool = False,
     cleared: bool = False,
     error: str | None = None,
 ) -> str:
     """Render operational settings with a development-only destructive action."""
 
+    display_version = version or _get_app_version()
     notices = ""
     if saved:
         notices += '<p class="notice success">Settings saved.</p>'
@@ -773,6 +807,11 @@ def _render_settings_page(
             <small class="hint">Public MusicBrainz access requires at least one second between requests.</small>
             <br /><button type="submit">Save settings</button>
           </form>
+        </section>
+        <section class="settings-card">
+          <p class="section-label">Application info</p>
+          <h2>Berlin Events Explorer</h2>
+          <p><strong>Version:</strong> {escape(display_version)}</p>
         </section>
         {reset}
       </div>

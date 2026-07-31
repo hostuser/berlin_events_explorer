@@ -21,6 +21,7 @@ from berlin_events_explorer.models import (
 )
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.webapp import (
+    _get_app_version,
     _paginate_events,
     _recent_events,
     _periodic_sync,
@@ -628,6 +629,7 @@ def test_settings_page_updates_auto_approval_threshold(tmp_path) -> None:
 
     assert 'href="/settings"' in index_response.text
     assert 'value="0.9"' in settings_response.text
+    assert f"<strong>Version:</strong> {_get_app_version()}" in settings_response.text
     assert save_response.status_code == 303
     assert save_response.headers["location"] == "/settings?saved=1"
     assert EventStore(database).get_setting("auto_approve_threshold") == 0.94
@@ -643,6 +645,28 @@ def test_settings_page_rejects_threshold_outside_probability_range(tmp_path) -> 
     assert response.status_code == 400
     assert "between 0 and 1" in response.text
     assert EventStore(database).get_setting("auto_approve_threshold") == 0.9
+
+
+def test_app_version_prefers_exact_git_tag(monkeypatch) -> None:
+    """Tagged checkouts should display the release tag over stale metadata."""
+
+    monkeypatch.setattr(
+        "berlin_events_explorer.webapp._run_git",
+        lambda *args: "0.0.4" if args[0] == "describe" else "ignored",
+    )
+
+    assert _get_app_version() == "0.0.4"
+
+
+def test_app_version_uses_commit_for_untagged_checkout(monkeypatch) -> None:
+    """Untagged checkouts should identify the running commit."""
+
+    monkeypatch.setattr(
+        "berlin_events_explorer.webapp._run_git",
+        lambda *args: None if args[0] == "describe" else "864f5f8bcf87",
+    )
+
+    assert _get_app_version() == "git:864f5f8bcf87"
 
 
 def test_manual_sync_uses_threshold_saved_in_settings(tmp_path, monkeypatch) -> None:
