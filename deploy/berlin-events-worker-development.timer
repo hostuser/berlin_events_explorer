@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Berlin Events Explorer Development Enrichment Worker every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+Persistent=true
+Unit=berlin-events-worker-development.service
+
+[Install]
+WantedBy=timers.target

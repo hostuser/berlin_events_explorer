@@ -45,6 +45,7 @@ from berlin_events_explorer.venue_enrichment import (
 from berlin_events_explorer.venue_ingestion import sync_source_and_ingest_venues
 from berlin_events_explorer.venues import bootstrap_venue_catalog
 from berlin_events_explorer.webapp import run_server
+from berlin_events_explorer.worker import run_default_worker
 from berlin_events_explorer.sync import (
     SyncError,
     clear_sync_cache,
@@ -498,6 +499,67 @@ def artists_accept(database: Path, artist_id: str, musicbrainz_id: str) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc))
     console.print(f"[bold]Verified artist[/bold]: {artist.name}")
+
+
+@cli.command("worker")
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+@click.option(
+    "--artist-limit", type=click.IntRange(min=1, max=50), default=10, show_default=True
+)
+@click.option(
+    "--homepage-limit",
+    type=click.IntRange(min=1, max=50),
+    default=10,
+    show_default=True,
+)
+@click.option(
+    "--musicbrainz-cache-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Shared MusicBrainz response cache directory.",
+)
+@click.option(
+    "--request-interval-seconds",
+    type=click.FloatRange(min=1.0, max=300.0),
+    default=DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
+    show_default=True,
+    help="Minimum gap between public MusicBrainz requests.",
+)
+@click.option(
+    "--auto-approve-threshold",
+    type=click.FloatRange(min=0, max=1),
+    default=DEFAULT_AUTO_APPROVE_THRESHOLD,
+    show_default=True,
+    help="Auto-approve one unambiguous venue candidate at or above this score.",
+)
+def worker(
+    database: Path,
+    artist_limit: int,
+    homepage_limit: int,
+    musicbrainz_cache_dir: Path | None,
+    request_interval_seconds: float,
+    auto_approve_threshold: float,
+) -> None:
+    """Run one bounded background sync and enrichment pass."""
+
+    try:
+        run = run_default_worker(
+            EventStore(database),
+            artist_limit=artist_limit,
+            homepage_limit=homepage_limit,
+            musicbrainz_cache_dir=musicbrainz_cache_dir,
+            musicbrainz_request_interval_seconds=request_interval_seconds,
+            auto_approve_threshold=auto_approve_threshold,
+        )
+    except Exception as exc:
+        raise click.ClickException(f"Worker failed: {exc}") from exc
+    console.print(f"[bold]Worker complete[/bold]: run {run.id} {run.status}")
 
 
 @cli.command()

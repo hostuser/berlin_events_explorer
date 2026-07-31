@@ -83,28 +83,57 @@ Run the new Litestar web interface to browse synced events:
 uv run berlin-events web --database events.sqlite --host 127.0.0.1 --port 8000
 ```
 
-### Automatic synchronization
+### Background worker and automatic synchronization
 
-The web service runs an in-process background sync by default, without a separate
-worker. It waits for the configured interval before the first run, then synchronizes
-sequentially; a slow sync never overlaps a second sync. The default is one hour:
+A separate one-shot worker performs synchronization and bounded enrichment without blocking
+web requests. It records each run in SQLite (`worker_runs`) with its final status, phase
+summaries, and any terminal error.
 
+```bash
+uv run berlin-events worker --database events.sqlite
 ```
-uv run berlin-events web --database events.sqlite --sync-interval-minutes 60
+
+Each pass performs these serial phases:
+
+1. Synchronize the event source and ingest newly encountered venues.
+2. Discover MusicBrainz candidates for at most 10 unresolved artists.
+3. Retrieve official homepages for at most 10 verified artists missing that metadata.
+
+The public-provider safeguards remain in effect: Nominatim is rate-limited, MusicBrainz has
+shared cross-process pacing, and each batch is resumable on the next run. Adjust bounded
+batch sizes when running manually:
+
+```bash
+uv run berlin-events worker --database events.sqlite --artist-limit 20 --homepage-limit 20
 ```
 
-Set `--sync-interval-minutes 0` to disable the scheduled sync. The existing **Sync now**
-control remains available for an immediate manual refresh.
+For development, install the committed systemd user units and enable the timer:
 
-The UI renders the local SQLite event list and includes a **Sync now** control. Each
-complete, downloaded source snapshot is reconciled with its provider's stored events, so
-source rows that disappear or duplicate rows that map to the same event are removed. Rows
-that cannot be parsed are logged and skipped; a structurally invalid source fails before
-the database transaction begins.
-Clicking it now triggers an in-page Datastar action that runs synchronization and updates the table without
-reloading the full page. During a fresh sync, the page first reports event import, then shows
-the current venue, a completed/total counter, and a progress bar while Nominatim enrichment
-runs.
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/berlin-events-worker-development.service \
+   deploy/berlin-events-worker-development.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now berlin-events-worker-development.timer
+```
+
+The development timer runs every 30 minutes and uses `flock`, so a slow run does not overlap
+the next invocation. Its companion web unit disables in-process scheduled synchronization;
+the existing **Sync now** control remains available for an immediate manual refresh.
+
+Production uses the same worker pipeline every hour. Install the production frontend under
+its existing unit name and enable the separate worker timer:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/berlin-events-production.service \
+   ~/.config/systemd/user/berlin-events-webfrontend.service
+cp deploy/berlin-events-worker-production.service \
+   deploy/berlin-events-worker-production.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user restart berlin-events-webfrontend.service
+systemctl --user enable --now berlin-events-worker-production.timer
+```
 
 ### Venue metadata
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Berlin Events Explorer Production Enrichment Worker hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=berlin-events-worker-production.service
+
+[Install]
+WantedBy=timers.target

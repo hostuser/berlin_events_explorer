@@ -238,6 +238,16 @@ logs_table = Table(
     Column("context_json", JSON, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, index=True),
 )
+worker_runs_table = Table(
+    "worker_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("finished_at", DateTime(timezone=True)),
+    Column("status", String(30), nullable=False, index=True),
+    Column("error", Text),
+    Column("summary_json", JSON, nullable=False),
+)
 settings_table = Table(
     "settings",
     metadata,
@@ -279,6 +289,18 @@ class LogEntry:
     message: str
     context: dict[str, Any]
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class WorkerRun:
+    """One bounded background-worker invocation and its visible outcome."""
+
+    id: int
+    started_at: datetime
+    finished_at: datetime | None
+    status: str
+    error: str | None
+    summary: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -324,6 +346,92 @@ class EventStore:
                     .where(settings_table.c.key == key)
                     .values(value_json=value, updated_at=now)
                 )
+
+    def start_worker_run(self) -> WorkerRun:
+        """Record a worker invocation before it begins its first external phase."""
+
+        started_at = datetime.now(timezone.utc)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                insert(worker_runs_table).values(
+                    started_at=started_at,
+                    finished_at=None,
+                    status="running",
+                    error=None,
+                    summary_json={},
+                )
+            )
+        primary_key = result.inserted_primary_key
+        if primary_key is None or not primary_key:
+            raise RuntimeError("SQLite did not return a worker run ID")
+        run_id = primary_key[0]
+        if not isinstance(run_id, int):
+            raise RuntimeError("SQLite did not return a worker run ID")
+        return WorkerRun(
+            id=run_id,
+            started_at=started_at,
+            finished_at=None,
+            status="running",
+            error=None,
+            summary={},
+        )
+
+    def finish_worker_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        summary: dict[str, Any],
+        error: str | None = None,
+    ) -> WorkerRun:
+        """Persist a terminal worker-run outcome and return its current record."""
+
+        if status not in {"succeeded", "failed"}:
+            raise ValueError("worker run status must be succeeded or failed")
+        finished_at = datetime.now(timezone.utc)
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(worker_runs_table)
+                .where(worker_runs_table.c.id == run_id)
+                .values(
+                    finished_at=finished_at,
+                    status=status,
+                    error=error,
+                    summary_json=summary,
+                )
+            )
+        run = self.get_worker_run(run_id)
+        if run is None:
+            raise ValueError(f"Unknown worker run: {run_id}")
+        return run
+
+    def get_worker_run(self, run_id: int) -> WorkerRun | None:
+        """Return one worker-run record by its database ID."""
+
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(worker_runs_table).where(worker_runs_table.c.id == run_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _worker_run_from_row(row) if row is not None else None
+
+    def latest_worker_run(self) -> WorkerRun | None:
+        """Return the newest background-worker run for operational status displays."""
+
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(worker_runs_table)
+                    .order_by(worker_runs_table.c.id.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _worker_run_from_row(row) if row is not None else None
 
     def clear_application_data(self) -> None:
         """Delete synchronized content while preserving application settings."""
@@ -1241,6 +1349,25 @@ class EventStore:
                 )
                 for row in rows
             ]
+
+
+def _worker_run_from_row(row: Any) -> WorkerRun:
+    """Convert SQLite worker-run data into an operational status record."""
+
+    started_at = row["started_at"]
+    finished_at = row["finished_at"]
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    if finished_at is not None and finished_at.tzinfo is None:
+        finished_at = finished_at.replace(tzinfo=timezone.utc)
+    return WorkerRun(
+        id=row["id"],
+        started_at=started_at,
+        finished_at=finished_at,
+        status=row["status"],
+        error=row["error"],
+        summary=row["summary_json"],
+    )
 
 
 def _diff_payload(old: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
