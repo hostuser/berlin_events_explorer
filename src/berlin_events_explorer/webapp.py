@@ -365,7 +365,77 @@ def create_app(
         tab: str = "recent",
         recent_days: int = 7,
         search: str = "",
-    ) -> Response:
+        entity_type: str = "all",
+        fragment: bool = False,
+    ) -> Response | Stream:
+        if tab == "venues":
+            summaries = store.list_venue_summaries()
+            normalized_page_size = _normalize_page_size(
+                page_size or _get_default_table_size(store)
+            )
+            content = _render_venues_content(
+                summaries,
+                page=page,
+                page_size=normalized_page_size,
+            )
+            if fragment:
+                return _render_tab_fragment(content, event_count=0)
+            return Response(
+                content=_render_venues_page(
+                    summaries,
+                    page=page,
+                    page_size=normalized_page_size,
+                ),
+                media_type="text/html",
+            )
+
+        if tab == "approvals":
+            pending_venues = [
+                venue
+                for venue in store.list_venues()
+                if venue.status
+                not in {
+                    VenueStatus.VERIFIED,
+                    VenueStatus.NOT_A_VENUE,
+                    VenueStatus.REJECTED,
+                }
+            ]
+            candidate_counts = {
+                venue.id: len(store.list_venue_candidates(venue.id))
+                for venue in pending_venues
+            }
+            pending_artists = [
+                artist
+                for artist in store.list_artists()
+                if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
+            ]
+            artist_candidate_counts = {
+                artist.id: len(store.list_artist_candidates(artist.id))
+                for artist in pending_artists
+            }
+            normalized_entity_type = (
+                entity_type if entity_type in {"all", "venues", "artists"} else "all"
+            )
+            content = _render_approval_content(
+                pending_venues,
+                candidate_counts,
+                pending_artists,
+                artist_candidate_counts,
+                entity_type=normalized_entity_type,
+            )
+            if fragment:
+                return _render_tab_fragment(content, event_count=0)
+            return Response(
+                content=_render_approval_queue(
+                    pending_venues,
+                    candidate_counts,
+                    pending_artists,
+                    artist_candidate_counts,
+                    entity_type=normalized_entity_type,
+                ),
+                media_type="text/html",
+            )
+
         (
             paged_events,
             filtered_count,
@@ -395,6 +465,22 @@ def create_app(
             venue_ids_by_event=venue_ids_by_event,
             artist_ids_by_event_performer=artist_ids_by_event_performer,
         )
+        if fragment:
+            return _render_tab_fragment(
+                _render_event_content(
+                    paged_events,
+                    total_count=filtered_count,
+                    page=current_page,
+                    page_size=normalized_page_size,
+                    total_pages=total_pages,
+                    tab=tab if tab in {"recent", "upcoming"} else "upcoming",
+                    recent_days=normalized_days,
+                    search=search.strip(),
+                    venue_ids_by_event=venue_ids_by_event,
+                    artist_ids_by_event_performer=artist_ids_by_event_performer,
+                ),
+                event_count=filtered_count,
+            )
         return Response(content=html, media_type="text/html")
 
     @get("/events/search", sync_to_thread=True)
@@ -478,16 +564,15 @@ def create_app(
         )
 
     @get("/venues", sync_to_thread=True)
-    def venues() -> Response:
-        """Render the public venue catalog with event counts."""
+    def venues(page: int = 1, page_size: int = 0) -> Redirect:
+        """Redirect the legacy catalog path to the canonical application URL."""
 
-        return Response(
-            content=_render_venues_page(
-                store.list_venue_summaries(),
-                table_size=_get_default_table_size(store),
-            ),
-            media_type="text/html",
-        )
+        destination = "/?tab=venues"
+        if page != 1:
+            destination += f"&page={page}"
+        if page_size:
+            destination += f"&page_size={page_size}"
+        return Redirect(destination, status_code=303)
 
     @get("/venues/{venue_id:str}", sync_to_thread=True)
     def venue_detail(venue_id: str) -> Response:
@@ -529,41 +614,13 @@ def create_app(
         )
 
     @get("/approvals", sync_to_thread=True)
-    def approvals(entity_type: str = "all") -> Response:
-        """Render every canonical entity still waiting for editorial approval."""
+    def approvals(entity_type: str = "all") -> Redirect:
+        """Redirect the legacy queue path to the canonical application URL."""
 
-        pending_venues = [
-            venue
-            for venue in store.list_venues()
-            if venue.status
-            not in {VenueStatus.VERIFIED, VenueStatus.NOT_A_VENUE, VenueStatus.REJECTED}
-        ]
-        candidate_counts = {
-            venue.id: len(store.list_venue_candidates(venue.id))
-            for venue in pending_venues
-        }
-        pending_artists = [
-            artist
-            for artist in store.list_artists()
-            if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
-        ]
-        artist_candidate_counts = {
-            artist.id: len(store.list_artist_candidates(artist.id))
-            for artist in pending_artists
-        }
-        normalized_entity_type = (
-            entity_type if entity_type in {"all", "venues", "artists"} else "all"
-        )
-        return Response(
-            content=_render_approval_queue(
-                pending_venues,
-                candidate_counts,
-                pending_artists,
-                artist_candidate_counts,
-                entity_type=normalized_entity_type,
-            ),
-            media_type="text/html",
-        )
+        destination = "/?tab=approvals"
+        if entity_type != "all":
+            destination += f"&entity_type={quote_plus(entity_type)}"
+        return Redirect(destination, status_code=303)
 
     @get("/approvals/venues/{venue_id:str}", sync_to_thread=False)
     def venue_approval(
@@ -768,6 +825,7 @@ def create_app(
         tab: str = "recent",
         recent_days: int = 7,
         search: str = "",
+        view: str = "events",
     ) -> Stream:
         return Stream(
             content=_perform_sync_stream(
@@ -777,6 +835,7 @@ def create_app(
                 tab=tab,
                 recent_days=recent_days,
                 search=search,
+                view=view,
                 auto_approve_threshold=_get_auto_approve_threshold(
                     store, auto_approve_threshold
                 ),
@@ -1252,7 +1311,7 @@ def _approval_nav() -> str:
     )
 
 
-def _render_approval_queue(
+def _legacy_render_approval_queue(
     venues: list[VenueRecord],
     venue_candidate_counts: dict[str, int],
     artists: list[ArtistRecord],
@@ -1546,7 +1605,7 @@ main {{ max-width:760px; margin:0 auto; padding:2rem 1.25rem 3rem; }} a {{ color
 </section><section><h2>Events</h2><ul>{event_items}</ul></section></main></body></html>"""
 
 
-def render_events_page(
+def _legacy_render_events_page(
     events: list[Event],
     *,
     total_count: int,
@@ -1921,13 +1980,13 @@ def render_events_page(
           <div class="filter-wrapper">
             <input class="filter-input" id="event-filter" type="search" name="search"
               data-bind="eventSearch"
-              data-on:input__debounce_350ms="@get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
+              data-on:input__debounce_350ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
               value="{escape(search, quote=True)}"
               placeholder="Search by title, venue, or performers" autocomplete="off" />
             <button class="filter-clear" id="event-filter-clear" type="button"
               aria-label="Clear filter"
               data-attr="{{'hidden': $eventSearch.length === 0}}"
-              data-on:click="$eventSearch = ''; @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
+              data-on:click="$eventSearch = ''; history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
           </div>
         </div>
         <p class="result-count" id="event-result-count" aria-live="polite"
@@ -2000,7 +2059,7 @@ def _render_date_events_page(
 </html>"""
 
 
-def _render_venues_page(
+def _legacy_render_venues_page(
     summaries: list[VenueSummary], *, table_size: int = DEFAULT_TABLE_SIZE
 ) -> str:
     """Render the venue catalog and its client-side name filter."""
@@ -2302,6 +2361,7 @@ def _perform_sync_stream(
     tab: str = "upcoming",
     recent_days: int = 7,
     search: str = "",
+    view: str = "events",
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
 ):
     """Run sync and emit Datastar SSE patch events."""
@@ -2379,26 +2439,70 @@ def _perform_sync_stream(
         page=page,
         page_size=page_size,
     )
-    events_panel = _render_events_panel(
-        paged_events,
-        total_count=len(synced_events),
-        page=current_page,
-        page_size=normalized_page_size,
-        total_pages=total_pages,
-        tab=tab,
-        recent_days=normalized_days,
-        search=search.strip(),
-        venue_ids_by_event=store.get_venue_ids_for_events(
-            [event.id for event in paged_events]
-        ),
-        artist_ids_by_event_performer=_verified_artist_ids_by_event_performer(
-            store, [event.id for event in paged_events]
-        ),
-    )
-    yield _sse_event(
-        "datastar-patch-elements",
-        f"elements {events_panel}",
-    )
+    if view == "events":
+        events_panel = _render_events_panel(
+            paged_events,
+            total_count=len(synced_events),
+            page=current_page,
+            page_size=normalized_page_size,
+            total_pages=total_pages,
+            tab=tab,
+            recent_days=normalized_days,
+            search=search.strip(),
+            venue_ids_by_event=store.get_venue_ids_for_events(
+                [event.id for event in paged_events]
+            ),
+            artist_ids_by_event_performer=_verified_artist_ids_by_event_performer(
+                store, [event.id for event in paged_events]
+            ),
+        )
+        yield _sse_event(
+            "datastar-patch-elements",
+            f"elements {events_panel}",
+        )
+    elif view == "venues":
+        yield _sse_event(
+            "datastar-patch-elements",
+            "elements "
+            + _render_tab_content_element(
+                _render_venues_content(
+                    store.list_venue_summaries(),
+                    page=page,
+                    page_size=page_size,
+                )
+            ),
+        )
+    elif view == "approvals":
+        pending_venues = [
+            venue
+            for venue in store.list_venues()
+            if venue.status
+            not in {VenueStatus.VERIFIED, VenueStatus.NOT_A_VENUE, VenueStatus.REJECTED}
+        ]
+        pending_artists = [
+            artist
+            for artist in store.list_artists()
+            if artist.status in {ArtistStatus.UNRESOLVED, ArtistStatus.CANDIDATE}
+        ]
+        yield _sse_event(
+            "datastar-patch-elements",
+            "elements "
+            + _render_tab_content_element(
+                _render_approval_content(
+                    pending_venues,
+                    {
+                        venue.id: len(store.list_venue_candidates(venue.id))
+                        for venue in pending_venues
+                    },
+                    pending_artists,
+                    {
+                        artist.id: len(store.list_artist_candidates(artist.id))
+                        for artist in pending_artists
+                    },
+                    entity_type="all",
+                )
+            ),
+        )
     yield _sse_event(
         "datastar-patch-signals",
         _signals_payload(
@@ -2469,6 +2573,29 @@ def _paginate_events(
     end = start + normalized_page_size
     return (
         events[start:end],
+        normalized_page,
+        normalized_page_size,
+        total_pages,
+    )
+
+
+def _paginate_venues(
+    summaries: list[VenueSummary], *, page: int, page_size: int
+) -> tuple[list[VenueSummary], int, int, int]:
+    """Return one normalized page of venue summaries."""
+
+    normalized_page = max(1, page)
+    normalized_page_size = _normalize_page_size(page_size)
+    total_count = len(summaries)
+    total_pages = (
+        max(1, math.ceil(total_count / normalized_page_size)) if total_count else 1
+    )
+    if normalized_page > total_pages:
+        normalized_page = total_pages
+    start = (normalized_page - 1) * normalized_page_size
+    end = start + normalized_page_size
+    return (
+        summaries[start:end],
         normalized_page,
         normalized_page_size,
         total_pages,
@@ -2653,21 +2780,43 @@ def _render_events_panel(
     end_index = min((page - 1) * page_size + len(events), total_count)
     has_prev = page > 1
     has_next = page < total_pages
-    search_param = f"&search={escape(search, quote=True)}" if search else ""
+    search_param = f"&search={quote_plus(search)}" if search else ""
     query_suffix = f"&tab={tab}&recent_days={recent_days}{search_param}"
     prev_url = (
-        f"?page={page - 1}&page_size={page_size}{query_suffix}" if has_prev else "#"
+        f"/?page={page - 1}&page_size={page_size}{query_suffix}" if has_prev else "#"
     )
     next_url = (
-        f"?page={page + 1}&page_size={page_size}{query_suffix}" if has_next else "#"
+        f"/?page={page + 1}&page_size={page_size}{query_suffix}" if has_next else "#"
+    )
+    previous_link = (
+        _render_in_place_link(
+            prev_url,
+            "Previous",
+            class_name="pagination-link",
+            app_view=tab,
+            event_tab=tab,
+        )
+        if has_prev
+        else '<a class="pagination-link disabled" href="#">Previous</a>'
+    )
+    next_link = (
+        _render_in_place_link(
+            next_url,
+            "Next",
+            class_name="pagination-link",
+            app_view=tab,
+            event_tab=tab,
+        )
+        if has_next
+        else '<a class="pagination-link disabled" href="#">Next</a>'
     )
 
     pagination = f"""
       <p class="meta">Showing {start_index} to {end_index} of {total_count} events</p>
       <div class="pagination" aria-label="Event pagination">
-        <a class="pagination-link {"disabled" if not has_prev else ""}" href="{prev_url}">Previous</a>
+        {previous_link}
         <span class="pagination-page">Page {page} of {total_pages}</span>
-        <a class="pagination-link {"disabled" if not has_next else ""}" href="{next_url}">Next</a>
+        {next_link}
       </div>
     """
 
@@ -2857,6 +3006,623 @@ def _render_event_row(
         f'<td data-label="Tags">{tags or "—"}</td>'
         "</tr>"
     )
+
+
+def _app_shell_styles() -> str:
+    """Return styles shared by every top-level application view."""
+
+    return """
+      :root { --surface:#fff; --surface-soft:#f3f5f9; --text:#0f172a;
+        --muted:#64748b; --primary:#2563eb; --line:#d5dbe8;
+        --danger:#dc2626; --radius-lg:.85rem; }
+      * { box-sizing:border-box; }
+      body { margin:0; min-height:100vh; color:var(--text);
+        font-family:Inter,"Segoe UI",Roboto,sans-serif;
+        background:linear-gradient(180deg,#f6f7fb 0%,#eef2ff 45%,#f8fafc 100%); }
+      a { color:var(--primary); }
+      .events-app { max-width:1100px; margin:0 auto; padding:2rem 1.25rem 3rem; }
+      .events-header { margin-bottom:1rem; }
+      .page-kicker { display:inline-block; margin:0 0 .3rem; color:var(--primary);
+        font-size:.85rem; font-weight:650; letter-spacing:.08em; text-transform:uppercase; }
+      h1 { margin:0; font-size:clamp(1.5rem,2.6vw,2.15rem); line-height:1.2; }
+      .toolbar { display:flex; justify-content:space-between; align-items:center;
+        gap:.75rem; flex-wrap:wrap; }
+      .toolbar-actions { display:flex; align-items:center; gap:.55rem; }
+      .settings-link { display:inline-flex; align-items:center; min-height:2.35rem;
+        padding:.45rem .75rem; border:1px solid var(--line); border-radius:var(--radius-lg);
+        color:var(--text); background:var(--surface); text-decoration:none; font-weight:600; }
+      .settings-link:hover { border-color:#93c5fd; background:#eff6ff; }
+      .sync-button { border:1px solid transparent; padding:.5rem 1rem;
+        border-radius:var(--radius-lg); background:linear-gradient(180deg,#2563eb 0%,#1d4ed8 100%);
+        color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+      .sync-button:disabled { filter:grayscale(.25); cursor:not-allowed; }
+      .sync-error { min-height:1.1rem; margin:.5rem 0; color:var(--danger); font-weight:500; }
+      .sync-progress { display:grid; gap:.45rem; margin:.75rem 0; color:var(--muted); font-size:.92rem; }
+      .sync-progress p { margin:0; }
+      .sync-progress progress { width:min(34rem,100%); height:.65rem; accent-color:var(--primary); }
+      .tabs { display:flex; gap:.35rem; align-items:center; margin:1.25rem 0 .75rem;
+        border-bottom:1px solid var(--line); overflow-x:auto; }
+      .tab { color:var(--muted); padding:.65rem .85rem; text-decoration:none;
+        border-bottom:3px solid transparent; font-weight:600; white-space:nowrap; }
+      .tab:hover,.tab.active { color:var(--primary); border-bottom-color:var(--primary); }
+      #tab-content { view-transition-name:tab-content; }
+      input:focus,a:focus,button:focus,[tabindex="0"]:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
+      @media (max-width:720px) { .events-app { padding:1rem .75rem 2rem; }
+        .toolbar { align-items:stretch; } .toolbar-actions { flex-wrap:wrap; } }
+    """
+
+
+def _fragment_url(href: str) -> str:
+    """Return the fragment endpoint corresponding to a canonical application URL."""
+
+    separator = "&" if "?" in href else "?"
+    return f"{href}{separator}fragment=1"
+
+
+def _in_place_navigation_action(
+    href: str, *, app_view: str, event_tab: str | None = None
+) -> str:
+    """Build one canonical URL + Datastar fragment navigation action."""
+
+    event_tab_assignment = f" $eventTab = '{event_tab}';" if event_tab else ""
+    return (
+        "evt.preventDefault(); "
+        f"history.pushState(null, '', '{href}'); "
+        f"$appView = '{app_view}';"
+        f"{event_tab_assignment} @get('{_fragment_url(href)}')"
+    )
+
+
+def _render_in_place_link(
+    href: str,
+    label: str,
+    *,
+    class_name: str,
+    app_view: str,
+    event_tab: str | None = None,
+    current: str = "",
+    attributes: str = "",
+) -> str:
+    """Render a progressive-enhancement link that preserves browser history."""
+
+    action = _in_place_navigation_action(
+        href,
+        app_view=app_view,
+        event_tab=event_tab,
+    )
+    return (
+        f'<a class="{class_name}" href="{escape(href, quote=True)}"{current} {attributes}'
+        f'data-on:click="{action}">{label}</a>'
+    )
+
+
+def _render_app_nav(
+    *,
+    active_tab: str,
+    recent_days: int = 7,
+    search: str = "",
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> str:
+    """Render persistent views using one URL-aware in-place navigation contract."""
+
+    active_tab = (
+        active_tab
+        if active_tab in {"recent", "upcoming", "venues", "approvals"}
+        else "upcoming"
+    )
+    encoded_search = quote_plus(search) if search else ""
+    search_param = f"&search={encoded_search}" if encoded_search else ""
+
+    def link(tab: str, label: str, href: str) -> str:
+        selected = " active" if active_tab == tab else ""
+        current = ' aria-current="page"' if active_tab == tab else ""
+        attributes = (
+            f"data-class:active=\"$appView === '{tab}'\" "
+            f"data-attr:aria-current=\"$appView === '{tab}' ? 'page' : null\" "
+        )
+        return _render_in_place_link(
+            href,
+            label,
+            class_name=f"tab{selected}",
+            current=current,
+            attributes=attributes,
+            app_view=tab,
+            event_tab=tab if tab in {"recent", "upcoming"} else None,
+        )
+
+    recent_href = (
+        f"/?tab=recent&recent_days={recent_days}&page_size={page_size}{search_param}"
+    )
+    upcoming_href = (
+        f"/?tab=upcoming&recent_days={recent_days}&page_size={page_size}{search_param}"
+    )
+    return (
+        '<nav class="tabs" aria-label="Application views">'
+        + link("recent", "Recently added", recent_href)
+        + link("upcoming", "Upcoming", upcoming_href)
+        + link("venues", "Venues", f"/?tab=venues&page_size={page_size}")
+        + link(
+            "approvals", "Awaiting approval", f"/?tab=approvals&page_size={page_size}"
+        )
+        + "</nav>"
+    )
+
+
+def _render_app_page(
+    *,
+    title: str,
+    active_tab: str,
+    content: str,
+    signals: Mapping[str, object] | None = None,
+    recent_days: int = 7,
+    search: str = "",
+    heading: str = "Berlin Events Explorer",
+) -> str:
+    """Render the shared document shell around one tab's content fragment."""
+
+    state: dict[str, object] = {
+        "appView": active_tab,
+        "eventTab": active_tab if active_tab in {"recent", "upcoming"} else "upcoming",
+        "eventRecentDays": recent_days,
+        "eventSearch": search,
+        "eventPageSize": DEFAULT_PAGE_SIZE,
+        "eventCount": 0,
+        "isSyncing": False,
+        "syncError": None,
+    }
+    if signals:
+        state.update(signals)
+    navigation_page_size = state["eventPageSize"]
+    if not isinstance(navigation_page_size, int):
+        navigation_page_size = DEFAULT_PAGE_SIZE
+    serialized_signals = escape(json.dumps(state), quote=True)
+    sync_action = (
+        "@post('sync?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab "
+        "+ '&amp;recent_days=' + $eventRecentDays + '&amp;search=' "
+        "+ encodeURIComponent($eventSearch) + '&amp;view=' + $appView)"
+    )
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escape(title)}</title>
+    <script type="module" src="{DATASTAR_SCRIPT}"></script>
+    <style>{_app_shell_styles()}{_event_shell_styles()}{_venue_shell_styles()}{_approval_styles()}</style>
+  </head>
+  <body>
+    <main class="events-app" data-signals='{serialized_signals}'>
+      <header class="events-header">
+        <p class="page-kicker">Berlin Events</p>
+        <div class="toolbar">
+          <h1 data-text="$eventCount > 0 ? 'Berlin Events Explorer (' + $eventCount + ')' : 'Berlin Events Explorer'">{escape(heading)}</h1>
+          <div class="toolbar-actions">
+            <button type="button" class="sync-button" data-attr="{{'disabled': $isSyncing}}"
+              data-text="$isSyncing ? 'Syncing...' : 'Sync now'" data-on:click="{sync_action}">Sync now</button>
+            <a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>
+          </div>
+        </div>
+      </header>
+      <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
+      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>
+      {_render_app_nav(active_tab=active_tab, recent_days=recent_days, search=search, page_size=navigation_page_size)}
+      <section id="tab-content">{content}</section>
+    </main>
+    <script>window.addEventListener('popstate', () => window.location.reload())</script>
+  </body>
+</html>"""
+
+
+def _render_tab_fragment(content: str, *, event_count: int) -> Stream:
+    """Patch tab content and persistent shell signals in one Datastar response."""
+
+    payload = _sse_event(
+        "datastar-patch-elements",
+        "selector #tab-content",
+        "mode outer",
+        "useViewTransition true",
+        f"elements {_render_tab_content_element(content)}",
+    ) + _sse_event(
+        "datastar-patch-signals",
+        _signals_payload(
+            event_count=event_count,
+            is_syncing=False,
+            sync_error=None,
+        ),
+    )
+    return Stream(
+        content=iter((payload,)),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def _render_tab_content_element(content: str) -> str:
+    """Wrap tab content for a Datastar element patch event."""
+
+    return f'<section id="tab-content">{content}</section>'
+
+
+def _render_event_content(
+    events: list[Event],
+    *,
+    total_count: int,
+    page: int,
+    page_size: int,
+    total_pages: int,
+    tab: str,
+    recent_days: int,
+    search: str,
+    venue_ids_by_event: dict[str, str] | None = None,
+    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+) -> str:
+    """Render the events tab without the shared document shell."""
+
+    recent_settings = ""
+    if tab == "recent":
+        options = "".join(
+            f'<option value="{days}"{" selected" if days == recent_days else ""}>'
+            f"Last {days} days</option>"
+            for days in (1, 7, 14, 30, 90)
+        )
+        recent_settings = (
+            '<form class="recent-settings" method="get">'
+            '<input type="hidden" name="tab" value="recent">'
+            '<label for="recent-days">Added within</label>'
+            '<select id="recent-days" name="recent_days" onchange="this.form.submit()">'
+            f"{options}</select></form>"
+        )
+    events_html = _render_events_panel(
+        events,
+        total_count=total_count,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        tab=tab,
+        recent_days=recent_days,
+        search=search,
+        venue_ids_by_event=venue_ids_by_event,
+        artist_ids_by_event_performer=artist_ids_by_event_performer,
+    )
+    encoded_search = escape(search, quote=True)
+    return f"""{recent_settings}
+      <section class="filter-bar" aria-labelledby="event-filter-label">
+        <div class="filter-label" id="event-filter-label">
+          <label for="event-filter">Filter events</label>
+          <div class="filter-wrapper">
+            <input class="filter-input" id="event-filter" type="search" name="search"
+              data-bind="eventSearch"
+              data-on:input__debounce_350ms="history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize + '&amp;search=' + encodeURIComponent($eventSearch)); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))"
+              value="{encoded_search}" placeholder="Search by title, venue, or performers" autocomplete="off" />
+            <button class="filter-clear" id="event-filter-clear" type="button" aria-label="Clear filter"
+              data-attr="{{'hidden': $eventSearch.length === 0}}"
+              data-on:click="$eventSearch = ''; history.replaceState(null, '', '/?tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;page_size=' + $eventPageSize); @get('/events/search?page_size=' + $eventPageSize + '&amp;tab=' + $eventTab + '&amp;recent_days=' + $eventRecentDays + '&amp;search=' + encodeURIComponent($eventSearch))">&times;</button>
+          </div>
+        </div>
+        <p class="result-count" id="event-result-count" aria-live="polite"
+          data-text="$eventCount + ' events'">{total_count} events</p>
+      </section>
+      {events_html}"""
+
+
+def _event_shell_styles() -> str:
+    """Return styles specific to the events tab."""
+
+    return """
+      .recent-settings { display:flex; align-items:center; gap:.5rem; margin:0 0 .75rem;
+        color:var(--muted); font-size:.9rem; }
+      .recent-settings select { border:1px solid var(--line); border-radius:.45rem; padding:.35rem .5rem;
+        background:var(--surface); color:var(--text); }
+      .filter-bar { display:flex; align-items:end; justify-content:space-between; gap:1rem;
+        flex-wrap:wrap; margin:1.25rem 0 .8rem; }
+      .filter-label { display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
+        width:min(28rem,100%); }
+      .filter-input { width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
+        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }
+      .filter-wrapper { position:relative; }
+      .filter-clear { position:absolute; right:.5rem; top:50%; transform:translateY(-50%);
+        display:flex; align-items:center; justify-content:center; width:1.4rem; height:1.4rem;
+        border:0; border-radius:50%; background:#e2e8f0; color:#475569; cursor:pointer; padding:0; }
+      .result-count,.meta { color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }
+      #events-panel { margin-top:.5rem; background:var(--surface); border:1px solid var(--line);
+        border-radius:var(--radius-lg); padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }
+      .pagination { display:flex; align-items:center; gap:.75rem; margin:.4rem 0 1rem; }
+      .pagination-link { border-radius:999px; border:1px solid var(--line); color:var(--text);
+        text-decoration:none; padding:.35rem .85rem; font-size:.9rem; background:var(--surface-soft); }
+      .pagination-link.disabled { color:#94a3b8; pointer-events:none; background:#f8fafc; }
+    """ + _event_table_styles()
+
+
+def _render_events_page_new(
+    events: list[Event],
+    *,
+    total_count: int,
+    page: int,
+    page_size: int,
+    total_pages: int,
+    tab: str = "upcoming",
+    recent_days: int = 7,
+    search: str = "",
+    venue_ids_by_event: dict[str, str] | None = None,
+    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+) -> str:
+    """Render the events page using the shared application shell."""
+
+    active_tab = tab if tab in {"recent", "upcoming"} else "upcoming"
+    content = _render_event_content(
+        events,
+        total_count=total_count,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+        tab=active_tab,
+        recent_days=recent_days,
+        search=search,
+        venue_ids_by_event=venue_ids_by_event,
+        artist_ids_by_event_performer=artist_ids_by_event_performer,
+    )
+    return _render_app_page(
+        title="Berlin Events Explorer",
+        active_tab=active_tab,
+        content=content,
+        recent_days=recent_days,
+        search=search,
+        signals={
+            "eventCount": total_count,
+            "eventTab": active_tab,
+            "eventRecentDays": recent_days,
+            "eventSearch": search,
+            "eventPageSize": page_size,
+        },
+        heading=f"Berlin Events Explorer ({total_count})",
+    )
+
+
+def _render_venues_content(
+    summaries: list[VenueSummary],
+    *,
+    page: int = 1,
+    page_size: int = DEFAULT_TABLE_SIZE,
+    table_size: int | None = None,
+) -> str:
+    """Render one paginated venue catalog tab without the shared shell."""
+
+    if table_size is not None:
+        page_size = table_size
+    displayed_summaries, current_page, normalized_page_size, total_pages = (
+        _paginate_venues(summaries, page=page, page_size=page_size)
+    )
+    total_venues = len(summaries)
+    rows = ""
+    for summary in displayed_summaries:
+        venue = summary.venue
+        district = venue.district or "Not listed"
+        search_text = escape(f"{venue.name} {district}".casefold(), quote=True)
+        event_label = "event" if summary.event_count == 1 else "events"
+        rows += (
+            '<tr class="venue-row" data-venue-row '
+            f'data-venue-href="/venues/{escape(venue.id, quote=True)}" '
+            f'data-venue-search="{search_text}" tabindex="0" role="link">'
+            f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">{escape(venue.name)}</a></td>'
+            f'<td data-label="District">{escape(district)}</td>'
+            f'<td data-label="Events">{summary.event_count} {event_label}</td>'
+            "</tr>"
+        )
+
+    empty_table = (
+        '<p class="empty-state">No venues have been synced yet.</p>'
+        if not summaries
+        else ""
+    )
+    start_index = (current_page - 1) * normalized_page_size + 1 if total_venues else 0
+    end_index = min(
+        (current_page - 1) * normalized_page_size + len(displayed_summaries),
+        total_venues,
+    )
+    shown_text = f"Showing {start_index} to {end_index} of {total_venues} venues"
+    has_prev = current_page > 1
+    has_next = current_page < total_pages
+    prev_url = (
+        f"/?tab=venues&page={current_page - 1}&page_size={normalized_page_size}"
+        if has_prev
+        else "#"
+    )
+    next_url = (
+        f"/?tab=venues&page={current_page + 1}&page_size={normalized_page_size}"
+        if has_next
+        else "#"
+    )
+    previous_link = (
+        _render_in_place_link(
+            prev_url,
+            "Previous",
+            class_name="pagination-link",
+            app_view="venues",
+        )
+        if has_prev
+        else '<a class="pagination-link disabled" href="#">Previous</a>'
+    )
+    next_link = (
+        _render_in_place_link(
+            next_url,
+            "Next",
+            class_name="pagination-link",
+            app_view="venues",
+        )
+        if has_next
+        else '<a class="pagination-link disabled" href="#">Next</a>'
+    )
+    pagination = f"""
+      <p class="meta">{shown_text}</p>
+      <div class="pagination" aria-label="Venue pagination">
+        {previous_link}
+        <span class="pagination-page">Page {current_page} of {total_pages}</span>
+        {next_link}
+      </div>
+    """
+    return f"""<header class="tab-header"><p class="page-kicker">Catalog</p><h2>Venues</h2>
+      <p class="intro">Browse every venue in the catalog and the events currently associated with it.</p></header>
+      <section class="filter-bar" aria-labelledby="venue-filter-label">
+        <label class="filter-label" id="venue-filter-label" for="venue-filter">Filter venues
+          <input class="filter-input" id="venue-filter" type="search" placeholder="Search by venue or district" autocomplete="off" />
+        </label>
+        <p class="result-count" id="venue-result-count" aria-live="polite">{shown_text}</p>
+      </section>
+      <section id="venue-panel" aria-label="Venue list">{empty_table}
+        <p class="empty-state" id="venue-no-match" hidden>No venues match that filter.</p>
+        <table class="event-table"><thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead><tbody>{rows}</tbody></table>
+        {pagination}
+      </section>
+      <script>
+        (() => {{
+          const input = document.querySelector("#venue-filter");
+          const rows = [...document.querySelectorAll("[data-venue-row]")];
+          const count = document.querySelector("#venue-result-count");
+          const noMatch = document.querySelector("#venue-no-match");
+          const defaultCount = count.textContent;
+          const pluralize = (number) => `${{number}} venue${{number === 1 ? "" : "s"}}`;
+          const render = () => {{ const query = input.value.trim().toLocaleLowerCase(); let visible = 0;
+            for (const row of rows) {{ const matches = row.dataset.venueSearch.toLocaleLowerCase().includes(query);
+              row.hidden = !matches; if (matches) visible += 1; }}
+            count.textContent = query ? `${{pluralize(visible)}} on this page` : defaultCount;
+            noMatch.hidden = visible !== 0; }};
+          input.addEventListener("input", render);
+          for (const row of rows) {{ row.addEventListener("click", (event) => {{
+            if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref); }});
+            row.addEventListener("keydown", (event) => {{ if (event.key === "Enter" || event.key === " ") {{
+              event.preventDefault(); window.location.assign(row.dataset.venueHref); }} }}); }}
+          render();
+        }})();
+      </script>"""
+
+
+def _venue_shell_styles() -> str:
+    """Return styles specific to the venue catalog tab."""
+
+    return """
+      .tab-header h2 { margin:.1rem 0 .55rem; font-size:1.65rem; }
+      .intro { color:var(--muted); margin:.55rem 0 1.2rem; }
+      .filter-bar { display:flex; align-items:end; justify-content:space-between; gap:1rem;
+        flex-wrap:wrap; margin:1.25rem 0 .8rem; }
+      .filter-label { display:grid; gap:.35rem; color:#334155; font-size:.85rem; font-weight:700;
+        width:min(28rem,100%); }
+      .filter-input { width:100%; padding:.72rem .8rem; border:1px solid #b9c2d0;
+        border-radius:.65rem; color:var(--text); background:var(--surface); font:inherit; }
+      .filter-input:focus,.venue-row:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
+      .result-count { color:var(--muted); font-size:.9rem; margin:0 0 .2rem; }
+      #venue-panel { margin-top:.5rem; background:var(--surface); border:1px solid var(--line);
+        border-radius:var(--radius-lg); padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }
+      .venue-row { cursor:pointer; }
+      .venue-row:hover td,.venue-row:focus td { background:#f8fafc; }
+      .empty-state { color:var(--muted); margin:.35rem 0; }
+      .pagination { display:flex; align-items:center; gap:.75rem; margin:.4rem 0 1rem; }
+      .pagination-link { border-radius:999px; border:1px solid var(--line); color:var(--text);
+        text-decoration:none; padding:.35rem .85rem; font-size:.9rem; background:var(--surface-soft); }
+      .pagination-link.disabled { color:#94a3b8; pointer-events:none; background:#f8fafc; }
+    """ + _event_table_styles()
+
+
+def _render_venues_page_new(
+    summaries: list[VenueSummary],
+    *,
+    table_size: int = DEFAULT_TABLE_SIZE,
+    page: int = 1,
+    page_size: int | None = None,
+) -> str:
+    """Render the venue catalog using the shared application shell."""
+
+    normalized_page_size = _normalize_page_size(page_size or table_size)
+    return _render_app_page(
+        title="Venues · Berlin Events Explorer",
+        active_tab="venues",
+        content=_render_venues_content(
+            summaries,
+            page=page,
+            page_size=normalized_page_size,
+        ),
+        signals={"eventPageSize": normalized_page_size},
+    )
+
+
+def _render_approval_content(
+    venues: list[VenueRecord],
+    venue_candidate_counts: dict[str, int],
+    artists: list[ArtistRecord],
+    artist_candidate_counts: dict[str, int],
+    *,
+    entity_type: str,
+) -> str:
+    """Render the approval queue tab without the shared document shell."""
+
+    venue_rows = "".join(
+        '<tr><td><span class="status">Venue</span></td>'
+        f'<td><a href="/approvals/venues/{escape(venue.id)}">{escape(venue.name)}</a></td>'
+        f"<td>{escape(venue.status.value.replace('_', ' ').title())}</td>"
+        f"<td>{venue_candidate_counts.get(venue.id, 0)} {'suggestion' if venue_candidate_counts.get(venue.id, 0) == 1 else 'suggestions'}</td></tr>"
+        for venue in venues
+    )
+    artist_rows = "".join(
+        '<tr><td><span class="status">Artist</span></td>'
+        f'<td><a href="/approvals/artists/{escape(artist.id)}">{escape(artist.name)}</a></td>'
+        f"<td>{escape(artist.status.value.replace('_', ' ').title())}</td>"
+        f"<td>{artist_candidate_counts.get(artist.id, 0)} {'suggestion' if artist_candidate_counts.get(artist.id, 0) == 1 else 'suggestions'}</td></tr>"
+        for artist in artists
+    )
+    rows = (
+        venue_rows
+        if entity_type == "venues"
+        else artist_rows
+        if entity_type == "artists"
+        else venue_rows + artist_rows
+    )
+    tabs = "".join(
+        _render_in_place_link(
+            f"/?tab=approvals&entity_type={value}",
+            label,
+            class_name=f"tab{' active' if selected else ''}",
+            app_view="approvals",
+        )
+        for value, label, selected in (
+            ("all", "All", entity_type == "all"),
+            ("venues", "Venues", entity_type == "venues"),
+            ("artists", "Artists", entity_type == "artists"),
+        )
+    )
+    empty = '<p class="muted">Nothing is waiting for approval.</p>' if not rows else ""
+    return f"""<header class="tab-header"><p class="page-kicker">Editorial queue</p><h2>Awaiting approval</h2>
+      <p class="muted">Review suggested metadata before it appears as verified information.</p></header>
+      <nav class="tabs" aria-label="Entity filters">{tabs}</nav>
+      <section class="card">{empty}<table><thead><tr><th>Type</th><th>Name</th><th>Status</th><th>Suggestions</th></tr></thead><tbody>{rows}</tbody></table></section>"""
+
+
+def _render_approval_queue_new(
+    venues: list[VenueRecord],
+    venue_candidate_counts: dict[str, int],
+    artists: list[ArtistRecord],
+    artist_candidate_counts: dict[str, int],
+    *,
+    entity_type: str,
+) -> str:
+    """Render the approval queue using the shared application shell."""
+
+    return _render_app_page(
+        title="Awaiting approval · Berlin Events Explorer",
+        active_tab="approvals",
+        content=_render_approval_content(
+            venues,
+            venue_candidate_counts,
+            artists,
+            artist_candidate_counts,
+            entity_type=entity_type,
+        ),
+    )
+
+
+# The public renderer names are kept stable for callers and existing tests while
+# the implementations above provide the shared shell.
+render_events_page = _render_events_page_new
+_render_venues_page = _render_venues_page_new
+_render_approval_queue = _render_approval_queue_new
 
 
 def perform_sync(

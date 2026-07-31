@@ -25,9 +25,11 @@ from berlin_events_explorer.webapp import (
     _events_on_date,
     _get_default_table_size,
     _paginate_events,
+    _paginate_venues,
     _recent_events,
     _periodic_sync,
     _render_events_panel,
+    _render_venues_content,
     _render_venues_page,
     _upcoming_events,
     _sse_event,
@@ -100,6 +102,34 @@ def _render_events_page_from(
     )
 
 
+def test_venue_catalog_matches_event_table_pagination() -> None:
+    """Venue pages should use the same table and pagination contract as events."""
+
+    summaries = _seed_venue_summaries(3)
+    page = _render_venues_content(summaries, page=2, page_size=2)
+
+    assert 'class="event-table"' in page
+    assert 'aria-label="Venue pagination"' in page
+    assert "Venue 02" in page
+    assert "Venue 00" not in page
+    assert "Showing 3 to 3 of 3 venues" in page
+    assert "Page 2 of 2" in page
+    assert 'href="/?tab=venues&amp;page=1&amp;page_size=2"' in page
+    assert 'class="pagination-link disabled" href="#"' in page
+
+
+def test_paginate_venues_clamps_requested_page() -> None:
+    """Venue pagination should clamp pages beyond the available range."""
+
+    summaries = _seed_venue_summaries(3)
+    page, current_page, page_size, total_pages = _paginate_venues(
+        summaries, page=99, page_size=2
+    )
+
+    assert [summary.venue.id for summary in page] == ["venue-2"]
+    assert (current_page, page_size, total_pages) == (2, 2, 2)
+
+
 def test_render_events_page_renders_table_rows() -> None:
     """The HTML renderer should include key event fields and Datastar wiring."""
 
@@ -122,7 +152,8 @@ def test_render_events_page_renders_table_rows() -> None:
         "data-on:click=\"@post('sync?page_size=' + $eventPageSize + '&amp;tab='" in page
     )
     assert 'data-bind="eventSearch"' in page
-    assert "data-on:input__debounce_350ms=\"@get('/events/search?" in page
+    assert 'data-on:input__debounce_350ms="history.replaceState(' in page
+    assert "@get('/events/search?" in page
     assert "requestSubmit" not in page
     assert "data-signals" in page
     assert "Page 1 of 2" in page
@@ -357,6 +388,120 @@ def test_webapp_root_route_renders_events(tmp_path) -> None:
     assert "Berlin Events Explorer" in response.text
 
 
+@pytest.mark.parametrize("path", ["/?tab=upcoming", "/?tab=venues", "/?tab=approvals"])
+def test_top_level_views_share_application_shell(tmp_path, path: str) -> None:
+    """Every top-level tab exposes the persistent controls and tab target."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        response = client.get(path)
+
+    assert response.status_code == 200
+    assert response.text.count('class="sync-button"') == 1
+    assert response.text.count('href="/settings"') == 1
+    assert response.text.count('id="tab-content"') == 1
+    assert response.text.count('id="sync-progress"') == 1
+    assert 'data-on:click="evt.preventDefault();' in response.text
+
+
+@pytest.mark.parametrize("path", ["/?tab=upcoming", "/?tab=venues", "/?tab=approvals"])
+def test_datastar_tab_fragments_patch_only_tab_content(tmp_path, path: str) -> None:
+    """Tab actions return a fragment suitable for morphing without a full reload."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        response = client.get(
+            f"{path}&fragment=1" if "?" in path else f"{path}?fragment=1"
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: datastar-patch-elements" in response.text
+    assert "data: selector #tab-content" in response.text
+    assert "data: mode outer" in response.text
+    assert "data: useViewTransition true" in response.text
+    assert 'data: elements <section id="tab-content">' in response.text
+    assert "<!doctype html>" not in response.text
+    assert response.text.count('id="tab-content"') == 1
+    assert "event: datastar-patch-signals" in response.text
+
+
+def test_event_tab_fragment_patches_the_persistent_event_count(tmp_path) -> None:
+    """An in-place event navigation must refresh signals outside tab-content."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.upsert(_seed_event())
+
+    with TestClient(create_app(database)) as client:
+        response = client.get("/?tab=upcoming&fragment=1")
+
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: datastar-patch-elements" in response.text
+    assert "event: datastar-patch-signals" in response.text
+    assert (
+        "data: signals {eventCount: 1, isSyncing: false, syncError: null}"
+        in response.text
+    )
+
+
+def test_application_navigation_writes_the_canonical_url(tmp_path) -> None:
+    """In-place navigation must keep browser history aligned with rendered content."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        response = client.get("/?tab=upcoming&page_size=10")
+
+    assert response.status_code == 200
+    assert "history.pushState(null, '', '/?tab=venues&page_size=10')" in response.text
+    assert (
+        "history.pushState(null, '', '/?tab=approvals&page_size=10')" in response.text
+    )
+    assert (
+        "history.pushState(null, '', '/?tab=recent&recent_days=7&page_size=10')"
+        in response.text
+    )
+    assert (
+        "window.addEventListener('popstate', () => window.location.reload())"
+        in response.text
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy_path", "canonical_path"),
+    [
+        ("/venues", "/?tab=venues"),
+        ("/approvals", "/?tab=approvals"),
+    ],
+)
+def test_legacy_top_level_paths_redirect_to_canonical_tab_urls(
+    tmp_path, legacy_path: str, canonical_path: str
+) -> None:
+    """Top-level application views have one canonical root-route URL shape."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        response = client.get(legacy_path, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == canonical_path
+
+
+def test_event_pagination_uses_in_place_history_navigation() -> None:
+    """Event pagination should patch the tab while exposing its canonical URL."""
+
+    page = _render_events_panel(
+        _seed_events(1),
+        total_count=2,
+        page=1,
+        page_size=1,
+        total_pages=2,
+        tab="upcoming",
+    )
+
+    assert (
+        "history.pushState(null, '', '/?page=2&page_size=1&tab=upcoming&recent_days=7')"
+        in page
+    )
+    assert "@get('/?page=2&page_size=1&tab=upcoming&recent_days=7&fragment=1')" in page
+
+
 def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
     """The page should expose an in-place sync trigger handled by Datastar."""
 
@@ -371,10 +516,11 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
         in response.text
     )
     assert 'data-bind="eventSearch"' in response.text
-    assert "data-on:input__debounce_350ms=\"@get('/events/search?" in response.text
+    assert 'data-on:input__debounce_350ms="history.replaceState(' in response.text
+    assert "@get('/events/search?" in response.text
     assert "requestSubmit" not in response.text
     assert "Sync now" in response.text
-    assert 'href="/approvals"' in response.text
+    assert 'href="/?tab=approvals&amp;page_size=' in response.text
     assert "Awaiting approval" in response.text
 
 
@@ -1344,7 +1490,7 @@ def test_render_venues_page_limits_rows_to_table_size() -> None:
 
     assert "Venue 09" in html
     assert "Venue 10" not in html
-    assert "Showing 10 of 50 venues" in html
+    assert "Showing 1 to 10 of 50 venues" in html
 
 
 def test_render_venues_page_shows_all_when_under_limit() -> None:
@@ -1354,8 +1500,7 @@ def test_render_venues_page_shows_all_when_under_limit() -> None:
     html = _render_venues_page(summaries, table_size=20)
 
     assert "Venue 04" in html
-    assert "5 venues" in html
-    assert "Showing" not in html
+    assert "Showing 1 to 5 of 5 venues" in html
 
 
 def test_index_route_uses_default_table_size_setting(tmp_path) -> None:
@@ -1434,7 +1579,7 @@ def test_venues_route_uses_default_table_size_setting(tmp_path) -> None:
     assert response.status_code == 200
     assert "Venue 02" in response.text
     assert "Venue 03" not in response.text
-    assert "Showing 3 of 30 venues" in response.text
+    assert "Showing 1 to 3 of 30 venues" in response.text
 
 
 def test_settings_page_includes_default_table_size(tmp_path) -> None:
