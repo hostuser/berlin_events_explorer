@@ -187,3 +187,92 @@ def test_venues_discover_keeps_high_confidence_candidate_for_manual_review(
     assert pending is not None
     assert pending.status is VenueStatus.CANDIDATE
     assert pending.address is None
+
+
+def test_users_create_admin_creates_a_working_account(tmp_path: Path) -> None:
+    """Bootstrap: the first admin is created on the host, then logs in via web."""
+
+    from berlin_events_explorer import auth
+    from berlin_events_explorer.models import UserRole
+
+    database = tmp_path / "events.sqlite"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "users",
+            "create-admin",
+            "--database",
+            str(database),
+            "--email",
+            "admin@example.test",
+            "--display-name",
+            "Admin",
+        ],
+        input="a-strong-password\na-strong-password\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    credentials = EventStore(database).get_user_credentials("admin@example.test")
+    assert credentials is not None
+    assert credentials.user.role is UserRole.ADMIN
+    assert auth.verify_password(credentials.password_hash, "a-strong-password")
+
+
+def test_users_create_admin_rejects_duplicate_addresses(tmp_path: Path) -> None:
+    database = tmp_path / "events.sqlite"
+    arguments = [
+        "users",
+        "create-admin",
+        "--database",
+        str(database),
+        "--email",
+        "admin@example.test",
+    ]
+
+    first = CliRunner().invoke(
+        cli, arguments, input="a-strong-password\na-strong-password\n"
+    )
+    second = CliRunner().invoke(
+        cli, arguments, input="a-strong-password\na-strong-password\n"
+    )
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code != 0
+    assert "already exists" in second.output
+
+
+def test_users_create_admin_rejects_short_passwords(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "users",
+            "create-admin",
+            "--database",
+            str(tmp_path / "events.sqlite"),
+            "--email",
+            "admin@example.test",
+        ],
+        input="short\nshort\n",
+    )
+
+    assert result.exit_code != 0
+    assert "at least 10 characters" in result.output
+
+
+def test_users_list_shows_accounts(tmp_path: Path) -> None:
+    from berlin_events_explorer.models import UserRole
+
+    database = tmp_path / "events.sqlite"
+    EventStore(database).create_user(
+        email="a@b.example",
+        password_hash="hash",
+        display_name="Ada",
+        role=UserRole.EDITOR,
+    )
+
+    result = CliRunner().invoke(cli, ["users", "list", "--database", str(database)])
+
+    assert result.exit_code == 0, result.output
+    assert "a@b.example" in result.output
+    assert "editor" in result.output

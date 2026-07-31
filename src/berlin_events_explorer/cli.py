@@ -37,6 +37,8 @@ from berlin_events_explorer.migrations import (
 )
 from berlin_events_explorer.models import ArtistStatus, VenueStatus
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
+from berlin_events_explorer.auth import hash_password
+from berlin_events_explorer.models import UserRole
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.venue_enrichment import (
     DEFAULT_AUTO_APPROVE_THRESHOLD,
@@ -190,6 +192,78 @@ def augment(database: Path) -> None:
         f"{result.updated} updated, {result.unchanged} unchanged, "
         f"{result.processed} processed"
     )
+
+
+@cli.group()
+def users() -> None:
+    """Create and inspect web UI accounts."""
+
+
+@users.command("create-admin")
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+@click.option("--email", prompt=True, help="Email address for the admin account.")
+@click.option(
+    "--display-name",
+    default=None,
+    help="Display name; defaults to the email's local part.",
+)
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=True,
+    help="Password (prompted interactively when omitted).",
+)
+def users_create_admin(
+    database: Path, email: str, display_name: str | None, password: str
+) -> None:
+    """Create an administrator account for the web UI."""
+
+    if len(password) < 10:
+        raise click.ClickException("Choose a password of at least 10 characters.")
+    store = EventStore(database)
+    try:
+        user = store.create_user(
+            email=email,
+            password_hash=hash_password(password),
+            display_name=display_name or email.split("@")[0].title(),
+            role=UserRole.ADMIN,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    console.print(f"[bold]Administrator {user.email} created[/bold]")
+
+
+@users.command("list")
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+def users_list(database: Path) -> None:
+    """List accounts, their roles, and login activity."""
+
+    store = EventStore(database)
+    table = Table("Email", "Name", "Role", "Active", "Last login")
+    for account in store.list_users():
+        table.add_row(
+            account.email,
+            account.display_name,
+            account.role.value,
+            "yes" if account.is_active else "no",
+            account.last_login_at.date().isoformat()
+            if account.last_login_at
+            else "—",
+        )
+    console.print(table)
 
 
 @cli.group()
