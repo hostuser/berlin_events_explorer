@@ -22,7 +22,9 @@ inlining a color in a component rule.
 
 from hashlib import sha256
 
-# Light theme ("paper"), design_language.md §3.1.
+# Light theme ("paper"), design_language.md §3.1. "color-accent-ink" is the
+# label color on accent fills: ink in both themes, because signal yellow always
+# carries dark text (§3.4) even when --color-text flips to off-white.
 _TOKEN_VALUES: dict[str, str] = {
     "color-bg": "#F4F4F1",
     "color-surface": "#FFFFFF",
@@ -32,6 +34,7 @@ _TOKEN_VALUES: dict[str, str] = {
     "color-line": "#D8D9D4",
     "color-edge": "#6F747B",
     "color-accent": "#F0D722",
+    "color-accent-ink": "#1A1C1E",
     "color-accent-wash": "#FAF5D7",
     "color-danger": "#B42318",
     "color-danger-strong": "#8C1D13",
@@ -43,11 +46,48 @@ _TOKEN_VALUES: dict[str, str] = {
     "color-focus": "#1A1C1E",
 }
 
+# Dark theme ("night bus"), design_language.md §3.2. danger-strong is not in
+# the §3.2 table; on dark the danger tone itself is light enough to carry text
+# on the danger wash, so the role aliases to it.
+_DARK_TOKEN_VALUES: dict[str, str] = {
+    "color-bg": "#141518",
+    "color-surface": "#1C1E21",
+    "color-surface-sunken": "#24262A",
+    "color-text": "#E9EAE5",
+    "color-text-muted": "#A9ADB2",
+    "color-line": "#33363A",
+    "color-edge": "#8A8F96",
+    "color-accent": "#F0D722",
+    "color-accent-ink": "#1A1C1E",
+    "color-accent-wash": "#2C2A1A",
+    "color-danger": "#F2988F",
+    "color-danger-strong": "#F2988F",
+    "color-danger-wash": "#3A1712",
+    "color-success": "#7FCB9C",
+    "color-success-wash": "#15291D",
+    "color-warn": "#E5C95B",
+    "color-warn-wash": "#2E2812",
+    "color-focus": "#E9EAE5",
+}
+
 # §3.3 verified pairs: (foreground, background, required ratio).
 CONTRAST_PAIRS: list[tuple[str, str, float]] = [
     ("color-text", "color-bg", 4.5),
     ("color-text-muted", "color-surface", 4.5),
     ("color-text", "color-accent", 4.5),
+    ("color-accent-ink", "color-accent", 4.5),
+    ("color-danger", "color-surface", 4.5),
+    ("color-danger-strong", "color-danger-wash", 4.5),
+    ("color-success", "color-success-wash", 4.5),
+    ("color-warn", "color-warn-wash", 4.5),
+    ("color-edge", "color-surface", 3.0),
+]
+
+CONTRAST_PAIRS_DARK: list[tuple[str, str, float]] = [
+    ("color-text", "color-surface", 4.5),
+    ("color-text-muted", "color-surface", 4.5),
+    ("color-accent", "color-surface", 4.5),
+    ("color-accent-ink", "color-accent", 4.5),
     ("color-danger", "color-surface", 4.5),
     ("color-danger-strong", "color-danger-wash", 4.5),
     ("color-success", "color-success-wash", 4.5),
@@ -61,8 +101,10 @@ _FONT_FILES = (
 )
 
 
-def _color_tokens() -> str:
-    return "\n".join(f"  --{name}: {value};" for name, value in _TOKEN_VALUES.items())
+def _color_tokens(values: dict[str, str] | None = None) -> str:
+    return "\n".join(
+        f"  --{name}: {value};" for name, value in (values or _TOKEN_VALUES).items()
+    )
 
 
 _TOKENS = f"""
@@ -92,6 +134,14 @@ _TOKENS = f"""
   --motion-base: 200ms;
   --shadow-overlay: 0 8px 24px rgb(0 0 0 / 0.16);
 }}
+@media (prefers-color-scheme: dark) {{
+  :root:not([data-theme="light"]) {{
+{_color_tokens(_DARK_TOKEN_VALUES)}
+  }}
+}}
+:root[data-theme="dark"] {{
+{_color_tokens(_DARK_TOKEN_VALUES)}
+}}
 """
 
 _BASE = """
@@ -120,6 +170,13 @@ a { color: var(--color-text); text-decoration: underline;
 a:hover { background: var(--color-accent-wash); }
 button, input, select { line-height: 1.35; }
 :focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+/* Skip link (§8.4): visually hidden until focused, then a fixed surface chip. */
+.skip-link { position: absolute; left: -999rem; top: auto; }
+.skip-link:focus, .skip-link:focus-visible { position: fixed; left: var(--space-2);
+  top: var(--space-2); z-index: 100; background: var(--color-surface);
+  color: var(--color-text); padding: .6rem .9rem;
+  border: 1px solid var(--color-edge); border-radius: var(--radius-md);
+  text-decoration: none; }
 /* The timetable rule (§4.3): figures align vertically. */
 .event-table td, time, .pagination, .result-count, .meta, .stamp, .confidence {
   font-variant-numeric: tabular-nums; }
@@ -154,10 +211,10 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
   background: var(--color-surface-sunken); text-decoration: none; font-weight: 600; }
 .settings-link:hover { background: var(--color-accent-wash); }
 /* Primary action: ink on signal yellow with an ink border — the BVG move (§7.3). */
-.sync-button { border: 1px solid var(--color-text); padding: .5rem 1rem;
+.sync-button { border: 1px solid var(--color-accent-ink); padding: .5rem 1rem;
   border-radius: var(--radius-md); background: var(--color-accent);
-  color: var(--color-text); font: inherit; font-weight: 700; cursor: pointer; }
-.sync-button:hover { background: var(--color-accent-wash); }
+  color: var(--color-accent-ink); font: inherit; font-weight: 700; cursor: pointer; }
+.sync-button:hover { filter: brightness(1.05); }
 .sync-button:disabled { background: var(--color-surface-sunken);
   color: var(--color-text-muted); border-color: var(--color-edge); cursor: not-allowed; }
 .sync-error { min-height: 1.1rem; margin: var(--space-2) 0; color: var(--color-danger);
@@ -194,8 +251,8 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
   background: var(--color-surface); font: inherit; }
 .filter-wrapper { position: relative; }
 .filter-clear { position: absolute; right: .5rem; top: 50%; transform: translateY(-50%);
-  display: flex; align-items: center; justify-content: center; width: 1.4rem;
-  height: 1.4rem; border: 0; border-radius: var(--radius-full);
+  display: flex; align-items: center; justify-content: center; width: 1.5rem;
+  height: 1.5rem; border: 0; border-radius: var(--radius-full);
   background: var(--color-surface-sunken); color: var(--color-text);
   cursor: pointer; padding: 0; }
 .result-count, .meta { color: var(--color-text-muted); font-size: var(--text-sm);
@@ -219,7 +276,7 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
   border: 1px solid var(--color-line); border-radius: var(--radius-lg);
   padding: .9rem; }
 .venue-row { cursor: pointer; }
-.venue-row:hover td, .venue-row:focus td { background: var(--color-accent-wash); }
+.venue-row:hover td { background: var(--color-accent-wash); }
 .empty-state { color: var(--color-text-muted); margin: .35rem 0; }
 
 /* --- approval workflow (queue tab + editor pages) --- */
@@ -255,9 +312,9 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
   border: 1px solid var(--color-edge); border-radius: var(--radius-md);
   color: var(--color-text); background: var(--color-surface); }
 .actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: var(--space-4); }
-.app-page button, .app-page .button { border: 1px solid var(--color-text);
+.app-page button, .app-page .button { border: 1px solid var(--color-accent-ink);
   border-radius: var(--radius-md); padding: .6rem .95rem; font-weight: 700;
-  cursor: pointer; background: var(--color-accent); color: var(--color-text); }
+  cursor: pointer; background: var(--color-accent); color: var(--color-accent-ink); }
 .app-page .button { display: inline-block; text-decoration: none; }
 .app-page button.secondary, .app-page .button.secondary {
   background: var(--color-surface-sunken); color: var(--color-text);
@@ -336,8 +393,8 @@ _VIEWS = """
   padding: .72rem .8rem; border: 1px solid var(--color-edge);
   border-radius: var(--radius-md); font: inherit; }
 .login-page button { margin-top: .9rem; padding: .72rem 1rem;
-  border: 1px solid var(--color-text); border-radius: var(--radius-md);
-  background: var(--color-accent); color: var(--color-text); font: inherit;
+  border: 1px solid var(--color-accent-ink); border-radius: var(--radius-md);
+  background: var(--color-accent); color: var(--color-accent-ink); font: inherit;
   font-weight: 700; cursor: pointer; }
 .login-page .back-link { display: inline-block; margin-top: var(--space-4); }
 
@@ -366,9 +423,9 @@ _VIEWS = """
 .detail-actions { display: flex; flex-wrap: wrap; gap: .65rem;
   margin-top: var(--space-5); }
 .action-button { display: inline-flex; align-items: center; justify-content: center;
-  min-height: 2.4rem; padding: .6rem .9rem; border: 1px solid var(--color-text);
+  min-height: 2.4rem; padding: .6rem .9rem; border: 1px solid var(--color-accent-ink);
   border-radius: var(--radius-md); background: var(--color-accent);
-  color: var(--color-text); font: inherit; font-weight: 700;
+  color: var(--color-accent-ink); font: inherit; font-weight: 700;
   text-decoration: none; cursor: pointer; }
 .action-button.secondary { border-color: var(--color-edge);
   background: var(--color-surface-sunken); color: var(--color-text); }

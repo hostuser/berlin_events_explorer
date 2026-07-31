@@ -32,12 +32,52 @@ def test_token_pairs_meet_wcag_contrast() -> None:
         assert ratio >= minimum, f"{name_a} on {name_b}: {ratio:.2f} < {minimum}"
 
 
+def test_dark_token_pairs_meet_wcag_contrast() -> None:
+    """Every §3.3 dark-theme pair meets its WCAG 2.2 AA requirement."""
+
+    for name_a, name_b, minimum in theme.CONTRAST_PAIRS_DARK:
+        ratio = _contrast(
+            theme._DARK_TOKEN_VALUES[name_a], theme._DARK_TOKEN_VALUES[name_b]
+        )
+        assert ratio >= minimum, f"dark {name_a} on {name_b}: {ratio:.2f} < {minimum}"
+
+
+def test_stylesheet_ships_both_themes() -> None:
+    """Dark tokens activate via media query and can be forced via data-theme."""
+
+    css = theme.stylesheet()
+    assert "@media (prefers-color-scheme: dark)" in css
+    assert '[data-theme="dark"]' in css
+    assert '[data-theme="light"]' in css
+
+
 def test_no_hex_literals_outside_token_layer() -> None:
     """A hex literal outside the tokens layer is a defect (§3.4)."""
 
     css = theme.stylesheet()
     body = css.split("@layer base", 1)[1]
     assert not re.findall(r"#[0-9a-fA-F]{3,8}\b", body)
+
+
+@pytest.mark.parametrize("path", ["/", "/login"])
+def test_every_page_offers_a_skip_link(tmp_path, path) -> None:
+    """The first focusable element jumps to #main (§8.4)."""
+
+    app = create_app(tmp_path / "events.sqlite")
+    with TestClient(app=app) as client:
+        response = client.get(path, follow_redirects=True)
+    assert 'class="skip-link" href="#main"' in response.text
+    assert 'id="main"' in response.text
+
+
+def test_venue_rows_keep_table_semantics(tmp_path) -> None:
+    """Rows must not carry role=link/tabindex — the cell's <a> is the link (§7.2)."""
+
+    app = create_app(tmp_path / "events.sqlite")
+    with TestClient(app=app) as client:
+        response = client.get("/?tab=venues", follow_redirects=True)
+    assert 'role="link"' not in response.text
+    assert "<tr" not in response.text or 'tr class="venue-row" tabindex' not in response.text
 
 
 @pytest.mark.parametrize(

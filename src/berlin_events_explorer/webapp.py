@@ -201,7 +201,8 @@ def _render_login_page(
     {theme.head_assets()}
   </head>
   <body class="login-page">
-    <main>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main">
       <section class="card">
         <h1>Editor login</h1>
         <p>Editorial tools require the editor password.</p>
@@ -2303,7 +2304,7 @@ def _render_events_panel(
     """
 
     return f"""<section id=\"events-panel\">
-      <div class="table-scroll" aria-label="Event results" style="--table-view-height:{_table_view_height(page_size)}">
+      <div class="table-scroll" role="region" aria-label="Event results" tabindex="0" style="--table-view-height:{_table_view_height(page_size)}">
         {event_table}
       </div>
       {pagination}
@@ -2690,7 +2691,8 @@ def _render_app_page(
     {theme.head_assets()}
   </head>
   <body class="app-page">
-    <main class="events-app" data-signals='{serialized_signals}'>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main" class="events-app" data-signals='{serialized_signals}'>
       <header class="events-header">
         <p class="page-kicker">{escape(kicker)}</p>
         <div class="toolbar">
@@ -2872,8 +2874,7 @@ def _render_venues_content(
         event_label = "event" if summary.event_count == 1 else "events"
         rows += (
             '<tr class="venue-row" data-venue-row '
-            f'data-venue-href="/venues/{escape(venue.id, quote=True)}" '
-            'tabindex="0" role="link">'
+            f'data-venue-href="/venues/{escape(venue.id, quote=True)}">'
             f'<td data-label="Name"><a href="/venues/{escape(venue.id, quote=True)}">{escape(venue.name)}</a></td>'
             f'<td data-label="District">{escape(district)}</td>'
             f'<td data-label="Events">{summary.event_count} {event_label}</td>'
@@ -2949,8 +2950,8 @@ def _render_venues_content(
           </div>
         </label>
       </section>
-      <section id="venue-panel" class="table-panel" aria-label="Venue list" style="--table-view-height:{_table_view_height(normalized_page_size)}">
-        <div class="table-scroll">
+      <section id="venue-panel" class="table-panel" style="--table-view-height:{_table_view_height(normalized_page_size)}">
+        <div class="table-scroll" role="region" aria-label="Venue list" tabindex="0">
           {empty_table}
           <table class="event-table"><thead><tr><th>Name</th><th>District</th><th>Events</th></tr></thead><tbody>{rows}</tbody></table>
         </div>
@@ -2961,11 +2962,11 @@ def _render_venues_content(
       </section>
       <script>
         (() => {{
+          // Whole-row click is a pointer convenience only; keyboard users
+          // follow the real link in the Name cell (§7.2 row-semantics fix).
           const rows = [...document.querySelectorAll("[data-venue-row]")];
           for (const row of rows) {{ row.addEventListener("click", (event) => {{
-            if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref); }});
-            row.addEventListener("keydown", (event) => {{ if (event.key === "Enter" || event.key === " ") {{
-              event.preventDefault(); window.location.assign(row.dataset.venueHref); }} }}); }}
+            if (!event.target.closest("a")) window.location.assign(row.dataset.venueHref); }}); }}
         }})();
       </script>"""
 
