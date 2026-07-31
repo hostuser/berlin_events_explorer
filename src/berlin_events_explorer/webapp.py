@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import secrets
 import subprocess
 from queue import Queue
 from threading import Thread
@@ -22,14 +24,19 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, timedelta
 from html import escape
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Annotated, AsyncIterator
 import math
 from urllib.parse import quote_plus, urlparse
 
 import httpx
 from litestar import Litestar, Request, get, post
-from litestar.params import FromPath, FromQuery
+from litestar.connection import ASGIConnection
+from litestar.exceptions import NotAuthorizedException
+from litestar.handlers import BaseRouteHandler
+from litestar.middleware.session.server_side import ServerSideSessionConfig
+from litestar.params import FromPath, FromQuery, QueryParameter
 from litestar.response import Redirect, Response, Stream
+from litestar.stores.memory import MemoryStore
 from pydantic import ValidationError
 
 from berlin_events_explorer.artist_enrichment import (
@@ -79,7 +86,96 @@ MAX_PAGE_SIZE = 200
 TABLE_ROW_SLOT_REM = 2.75
 TABLE_HEADER_SLOT_REM = 2.4
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
+EDITOR_PASSWORD_ENV_VAR = "BERLIN_EVENTS_EDITOR_PASSWORD"
+_SESSION_EDITOR_KEY = "is_editor"
 logger = logging.getLogger(__name__)
+
+
+def _require_editor(connection: ASGIConnection, _: BaseRouteHandler) -> None:
+    """Allow only clients that completed the editor login."""
+
+    if not connection.session.get(_SESSION_EDITOR_KEY):
+        raise NotAuthorizedException("Editor login required.")
+
+
+def _login_redirect(target: str) -> Redirect:
+    """Send an unauthenticated browser to the login form, preserving intent."""
+
+    return Redirect(f"/login?next={quote_plus(target)}", status_code=303)
+
+
+def _handle_not_authorized(request: Request, _: Exception) -> Response:
+    """Redirect browsers to the login form; non-GET requests get a plain 401."""
+
+    if request.method in {"GET", "HEAD"}:
+        target = request.url.path
+        if request.url.query:
+            target = f"{target}?{request.url.query}"
+        return _login_redirect(target)
+    return Response(
+        content="Editor login required.",
+        media_type="text/plain",
+        status_code=401,
+    )
+
+
+def _safe_next_target(value: str) -> str:
+    """Constrain post-login redirects to same-site absolute paths."""
+
+    if value.startswith("/") and not value.startswith(("//", "/\\")):
+        return value
+    return "/"
+
+
+def _render_login_page(next_target: str, *, error: str | None = None) -> str:
+    """Render the editor login form."""
+
+    error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Editor login · Berlin Events Explorer</title>
+    <style>
+      :root {{ --ink:#111827; --muted:#64748b; --line:#dbe1ea; --paper:#f6f7fb;
+        --card:#fff; --blue:#1d4ed8; --danger:#b42318; }}
+      * {{ box-sizing:border-box; }}
+      body {{ margin:0; color:var(--ink); background:var(--paper);
+        font-family:Inter,"Segoe UI",sans-serif; }}
+      main {{ width:min(26rem,calc(100% - 2rem)); margin:14vh auto 0; }}
+      .card {{ padding:1.5rem; border:1px solid var(--line); border-radius:1rem;
+        background:var(--card); box-shadow:0 18px 50px rgba(15,23,42,.06); }}
+      h1 {{ margin:0 0 .3rem; font-size:1.4rem; }}
+      p {{ color:var(--muted); }}
+      label {{ display:block; margin-top:1rem; font-weight:700; }}
+      input {{ display:block; width:100%; margin:.4rem 0 .3rem; padding:.72rem .8rem;
+        border:1px solid #b9c2d0; border-radius:.65rem; font:inherit; }}
+      button {{ margin-top:.9rem; padding:.72rem 1rem; border:0; border-radius:.65rem;
+        background:var(--blue); color:#fff; font:inherit; font-weight:750; cursor:pointer; }}
+      input:focus,a:focus,button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
+      .notice.error {{ padding:.8rem 1rem; border-radius:.7rem; font-weight:650;
+        color:var(--danger); background:#fee4e2; }}
+      .back-link {{ display:inline-block; margin-top:1rem; color:var(--blue); }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card">
+        <h1>Editor login</h1>
+        <p>Editorial tools require the editor password.</p>
+        {error_html}
+        <form method="post" action="/login">
+          <input type="hidden" name="next" value="{escape(next_target, quote=True)}" />
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" required autofocus />
+          <button type="submit">Log in</button>
+        </form>
+        <a class="back-link" href="/">← Back to events</a>
+      </section>
+    </main>
+  </body>
+</html>"""
 
 
 def _run_git(*args: str) -> str | None:
@@ -337,12 +433,19 @@ def create_app(
     sync_interval: timedelta | None = DEFAULT_SYNC_INTERVAL,
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
     environment: str = "production",
+    editor_password: str | None = None,
 ) -> Litestar:
     """Create a Litestar app that renders stored events as HTML."""
 
     store = EventStore(database)
     if environment not in {"development", "production"}:
         raise ValueError("environment must be 'development' or 'production'")
+    editor_password = editor_password or os.environ.get(EDITOR_PASSWORD_ENV_VAR) or None
+    if editor_password is None:
+        logger.warning(
+            "%s is not set; editorial routes will refuse all logins",
+            EDITOR_PASSWORD_ENV_VAR,
+        )
     if store.get_setting("auto_approve_threshold") is None:
         store.set_setting("auto_approve_threshold", auto_approve_threshold)
     if store.get_setting("musicbrainz_request_interval_seconds") is None:
@@ -362,8 +465,54 @@ def create_app(
     if store.get_setting("default_table_size") is None:
         store.set_setting("default_table_size", DEFAULT_TABLE_SIZE)
 
+    @get("/login", sync_to_thread=False)
+    def login_page(
+        next_target: Annotated[str | None, QueryParameter(query="next")] = None,
+    ) -> Response:
+        """Render the editor login form."""
+
+        return Response(
+            content=_render_login_page(_safe_next_target(next_target or "/")),
+            media_type="text/html",
+        )
+
+    @post("/login")
+    async def do_login(request: Request) -> Redirect | Response:
+        """Establish an editor session when the configured password matches."""
+
+        form = await request.form()
+        supplied = _form_string(form, "password")
+        next_target = _safe_next_target(_form_string(form, "next") or "/")
+        if editor_password is None:
+            return Response(
+                content=_render_login_page(
+                    next_target,
+                    error="Editor access is not configured on this server.",
+                ),
+                media_type="text/html",
+                status_code=400,
+            )
+        if not secrets.compare_digest(
+            supplied.encode("utf-8"), editor_password.encode("utf-8")
+        ):
+            return Response(
+                content=_render_login_page(next_target, error="Incorrect password."),
+                media_type="text/html",
+                status_code=400,
+            )
+        request.set_session({_SESSION_EDITOR_KEY: True})
+        return Redirect(next_target, status_code=303)
+
+    @post("/logout")
+    async def logout(request: Request) -> Redirect:
+        """Terminate the editor session."""
+
+        request.clear_session()
+        return Redirect("/", status_code=303)
+
     @get("/", sync_to_thread=True)
     def index(
+        request: Request,
         page: int = 1,
         page_size: int = 0,
         tab: str = "recent",
@@ -372,6 +521,8 @@ def create_app(
         entity_type: str = "all",
         fragment: bool = False,
     ) -> Response | Stream:
+        if tab == "approvals" and not request.session.get(_SESSION_EDITOR_KEY):
+            return _login_redirect("/?tab=approvals")
         if tab == "venues":
             summaries = store.list_venue_summaries()
             normalized_page_size = _normalize_page_size(
@@ -530,9 +681,7 @@ def create_app(
         return Stream(
             content=(
                 (
-                    _sse_event(
-                        "datastar-patch-elements", f"elements {events_panel}"
-                    )
+                    _sse_event("datastar-patch-elements", f"elements {events_panel}")
                     + _sse_event(
                         "datastar-patch-signals",
                         _signals_payload(
@@ -623,7 +772,7 @@ def create_app(
             media_type="text/html",
         )
 
-    @get("/approvals", sync_to_thread=True)
+    @get("/approvals", sync_to_thread=True, guards=[_require_editor])
     def approvals(entity_type: str = "all") -> Redirect:
         """Redirect the legacy queue path to the canonical application URL."""
 
@@ -632,7 +781,11 @@ def create_app(
             destination += f"&entity_type={quote_plus(entity_type)}"
         return Redirect(destination, status_code=303)
 
-    @get("/approvals/venues/{venue_id:str}", sync_to_thread=False)
+    @get(
+        "/approvals/venues/{venue_id:str}",
+        sync_to_thread=False,
+        guards=[_require_editor],
+    )
     def venue_approval(
         venue_id: FromPath[str], candidate_key: FromQuery[str | None] = None
     ) -> Response:
@@ -652,7 +805,7 @@ def create_app(
             media_type="text/html",
         )
 
-    @post("/approvals/venues/{venue_id:str}")
+    @post("/approvals/venues/{venue_id:str}", guards=[_require_editor])
     async def approve_venue(
         venue_id: FromPath[str], request: Request
     ) -> Redirect | Response:
@@ -705,7 +858,11 @@ def create_app(
         )
         return Redirect(destination, status_code=303)
 
-    @post("/approvals/venues/{venue_id:str}/discover", sync_to_thread=True)
+    @post(
+        "/approvals/venues/{venue_id:str}/discover",
+        sync_to_thread=True,
+        guards=[_require_editor],
+    )
     def discover_venue(venue_id: FromPath[str]) -> Redirect | Response:
         """Explicitly discover candidate metadata for one pending venue."""
 
@@ -736,7 +893,11 @@ def create_app(
             )
         return Redirect(f"/approvals/venues/{venue_id}", status_code=303)
 
-    @get("/approvals/artists/{artist_id:str}", sync_to_thread=False)
+    @get(
+        "/approvals/artists/{artist_id:str}",
+        sync_to_thread=False,
+        guards=[_require_editor],
+    )
     def artist_approval(artist_id: FromPath[str]) -> Response:
         """Render a review form for one canonical artist's candidate identities."""
 
@@ -754,7 +915,7 @@ def create_app(
             media_type="text/html",
         )
 
-    @post("/approvals/artists/{artist_id:str}")
+    @post("/approvals/artists/{artist_id:str}", guards=[_require_editor])
     async def approve_artist(
         artist_id: FromPath[str], request: Request
     ) -> Redirect | Response:
@@ -792,7 +953,11 @@ def create_app(
         )
         return Redirect(destination, status_code=303)
 
-    @post("/approvals/artists/{artist_id:str}/discover", sync_to_thread=True)
+    @post(
+        "/approvals/artists/{artist_id:str}/discover",
+        sync_to_thread=True,
+        guards=[_require_editor],
+    )
     def discover_artist(artist_id: FromPath[str]) -> Redirect | Response:
         """Explicitly fetch or rehydrate candidate identities for one artist."""
 
@@ -828,7 +993,7 @@ def create_app(
             )
         return Redirect(f"/approvals/artists/{artist_id}", status_code=303)
 
-    @post("/sync", status_code=200, sync_to_thread=True)
+    @post("/sync", status_code=200, sync_to_thread=True, guards=[_require_editor])
     def sync(
         page: int = 1,
         page_size: int = 0,
@@ -854,7 +1019,7 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
-    @get("/settings", sync_to_thread=False)
+    @get("/settings", sync_to_thread=False, guards=[_require_editor])
     def settings(
         saved: FromQuery[str | None] = None,
         cleared: FromQuery[str | None] = None,
@@ -878,7 +1043,7 @@ def create_app(
             media_type="text/html",
         )
 
-    @post("/settings")
+    @post("/settings", guards=[_require_editor])
     async def save_settings(request: Request) -> Redirect | Response:
         """Validate and persist settings used by subsequent synchronization passes."""
 
@@ -949,7 +1114,7 @@ def create_app(
         store.set_setting("default_table_size", table_size)
         return Redirect("/settings?saved=1", status_code=303)
 
-    @post("/settings/clear-database", sync_to_thread=True)
+    @post("/settings/clear-database", sync_to_thread=True, guards=[_require_editor])
     def clear_database() -> Redirect | Response:
         """Clear synchronized data when this app explicitly runs as development."""
 
@@ -991,6 +1156,7 @@ def create_app(
             with suppress(asyncio.CancelledError):
                 await task
 
+    session_config = ServerSideSessionConfig()
     return Litestar(
         route_handlers=[
             index,
@@ -1011,7 +1177,13 @@ def create_app(
             save_settings,
             clear_database,
             health,
+            login_page,
+            do_login,
+            logout,
         ],
+        middleware=[session_config.middleware],
+        stores={"sessions": MemoryStore()},
+        exception_handlers={NotAuthorizedException: _handle_not_authorized},
         lifespan=[periodic_sync_lifespan],
     )
 
