@@ -189,6 +189,8 @@ def test_webapp_date_route_lists_only_events_on_requested_date(tmp_path) -> None
 
     assert response.status_code == 200
     assert "Events on 2026-07-10" in response.text
+    assert "<th>Start date</th>" not in response.text
+    assert 'data-label="Start date"' not in response.text
     assert "Matching Event" in response.text
     assert "Earlier Event" not in response.text
     assert "Other Event" not in response.text

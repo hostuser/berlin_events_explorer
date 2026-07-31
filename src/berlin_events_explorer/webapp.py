@@ -1498,6 +1498,7 @@ def _render_date_events_page(
     rows = "".join(
         _render_event_row(
             event,
+            show_start_date=False,
             venue_id=venue_ids_by_event.get(event.id),
             artist_ids_by_billing_order={
                 billing_order: artist_id
@@ -1565,7 +1566,7 @@ def _render_date_events_page(
       <section class="card" aria-label="Events on {target_date.isoformat()}">
         {empty_state}
         <table>
-          <thead><tr><th>Start date</th><th>Title</th><th>Venue</th><th>Performers</th><th>Tags</th></tr></thead>
+          <thead><tr><th>Title</th><th>Venue</th><th>Performers</th><th>Tags</th></tr></thead>
           <tbody>{rows}</tbody>
         </table>
       </section>
@@ -2221,6 +2222,7 @@ def _render_event_row(
     event: Event,
     *,
     show_date_added: bool = False,
+    show_start_date: bool = True,
     venue_id: str | None = None,
     artist_ids_by_billing_order: dict[int, str] | None = None,
 ) -> str:
@@ -2250,13 +2252,16 @@ def _render_event_row(
         for performer in event.performers
     )
     tags = ", ".join(escape(tag) for tag in event.tags)
+    start_date_cell = (
+        f'<td data-label="Start date">{date_cell}</td>' if show_start_date else ""
+    )
     date_added_cell = (
         f'<td data-label="Date added">{date_added}</td>' if show_date_added else ""
     )
 
     return (
         "<tr>"
-        f'<td data-label="Start date">{date_cell}</td>'
+        f"{start_date_cell}"
         f"{date_added_cell}"
         f'<td data-label="Title">{title}</td>'
         f'<td data-label="Venue">{venue}</td>'
