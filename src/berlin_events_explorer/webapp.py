@@ -550,6 +550,185 @@ def _render_account_page(
     )
 
 
+def _render_reset_link_page(
+    *,
+    email: str,
+    reset_url: str,
+    email_sent: bool,
+    expires_at: datetime,
+    csrf_token: str | None = None,
+    user: UserRecord | None = None,
+) -> str:
+    """Render an admin-generated password reset link, shown exactly once."""
+
+    email_notice = (
+        f'<p class="notice success">Reset link emailed to {escape(email)}.</p>'
+        if email_sent
+        else (
+            '<p class="notice error">The reset email could not be sent. '
+            "Share the link below yourself.</p>"
+        )
+    )
+    content = f"""{email_notice}
+      <section class="settings-card">
+        <p class="section-label">Password reset</p>
+        <h2>{escape(email)}</h2>
+        <p>This link is shown only once — it is stored hashed and cannot be
+        displayed again.</p>
+        <input type="text" readonly value="{escape(reset_url, quote=True)}"
+               onfocus="this.select()" aria-label="Password reset link" />
+        <p>The link can be used once and expires at
+        {escape(expires_at.strftime("%Y-%m-%d %H:%M %Z"))}.</p>
+        <p><a href="/admin/users">← Back to user management</a></p>
+      </section>"""
+    return _render_app_page(
+        title="Password reset link · Berlin Events Explorer",
+        active_tab="admin",
+        content=content,
+        heading="Password reset link",
+        kicker="User management",
+        show_sync=False,
+        csrf_token=csrf_token,
+        user=user,
+    )
+
+
+def _render_admin_users_page(
+    users: list[UserRecord],
+    invites: list[AuthToken],
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+    csrf_token: str | None = None,
+    user: UserRecord | None = None,
+) -> str:
+    """Render account and invite management for administrators."""
+
+    notices = ""
+    if notice:
+        notices += f'<p class="notice success">{escape(notice)}</p>'
+    if error:
+        notices += f'<p class="notice error">{escape(error)}</p>'
+
+    def role_options(selected: UserRole) -> str:
+        return "".join(
+            f'<option value="{role.value}"'
+            f"{" selected" if role is selected else ""}>{role.value}</option>"
+            for role in UserRole
+        )
+
+    def user_row(account: UserRecord) -> str:
+        last_login = (
+            _format_date(account.last_login_at.date())
+            if account.last_login_at
+            else "never"
+        )
+        status = "Active" if account.is_active else "Deactivated"
+        toggle_action = "deactivate" if account.is_active else "reactivate"
+        toggle_label = "Deactivate" if account.is_active else "Reactivate"
+        return f"""<tr>
+          <td>{escape(account.email)}</td>
+          <td>{escape(account.display_name)}</td>
+          <td>
+            <form method="post" action="/admin/users/{account.id}/role"
+                  class="inline-form">
+              {_csrf_input(csrf_token)}
+              <select name="role" aria-label="Role for {escape(account.email, quote=True)}">
+                {role_options(account.role)}
+              </select>
+              <button type="submit">Change role</button>
+            </form>
+          </td>
+          <td>{status}</td>
+          <td>{last_login}</td>
+          <td>
+            <form method="post" action="/admin/users/{account.id}/{toggle_action}"
+                  class="inline-form">
+              {_csrf_input(csrf_token)}
+              <button type="submit">{toggle_label}</button>
+            </form>
+            <form method="post" action="/admin/users/{account.id}/reset-link"
+                  class="inline-form">
+              {_csrf_input(csrf_token)}
+              <button type="submit">Reset link</button>
+            </form>
+          </td>
+        </tr>"""
+
+    def invite_row(invite: AuthToken) -> str:
+        role_label = invite.role.value if invite.role else "user"
+        return f"""<tr>
+          <td>{escape(invite.email)}</td>
+          <td>{escape(role_label)}</td>
+          <td>{_format_date(invite.expires_at.date())}</td>
+          <td>
+            <form method="post" action="/admin/invites/{invite.id}/revoke"
+                  class="inline-form">
+              {_csrf_input(csrf_token)}
+              <button type="submit">Revoke</button>
+            </form>
+          </td>
+        </tr>"""
+
+    user_rows = "".join(user_row(account) for account in users)
+    invite_rows = "".join(invite_row(invite) for invite in invites)
+    invites_section = (
+        f"""<section class="settings-card">
+          <p class="section-label">Pending invitations</p>
+          <h2>Awaiting acceptance</h2>
+          <table>
+            <thead>
+              <tr><th>Email</th><th>Role</th><th>Expires</th><th>Actions</th></tr>
+            </thead>
+            <tbody>{invite_rows}</tbody>
+          </table>
+        </section>"""
+        if invites
+        else ""
+    )
+    content = f"""{notices}
+      <div class="settings-stack">
+        <section class="settings-card">
+          <p class="section-label">Accounts</p>
+          <h2>Users</h2>
+          <table>
+            <thead>
+              <tr><th>Email</th><th>Name</th><th>Role</th><th>Status</th>
+              <th>Last login</th><th>Actions</th></tr>
+            </thead>
+            <tbody>{user_rows}</tbody>
+          </table>
+        </section>
+        {invites_section}
+        <section class="settings-card">
+          <p class="section-label">Invite</p>
+          <h2>New invitation</h2>
+          <p>The invite email carries a single-use link that expires after
+          seven days.</p>
+          <form method="post" action="/admin/invites">
+            {_csrf_input(csrf_token)}
+            <label for="invite-email">Email</label>
+            <input id="invite-email" name="email" type="email" required />
+            <label for="invite-role">Role</label>
+            <select id="invite-role" name="role">
+              {role_options(UserRole.USER)}
+            </select>
+            <br /><button type="submit">Create invitation</button>
+          </form>
+        </section>
+      </div>"""
+    return _render_app_page(
+        title="Users · Berlin Events Explorer",
+        active_tab="admin",
+        content=content,
+        heading="User management",
+        kicker="Administration",
+        show_sync=False,
+        csrf_token=csrf_token,
+        user=user,
+    )
+
+
 class SyncInProgressError(RuntimeError):
     """Raised when a synchronization pass is already running in this process."""
 
@@ -1376,6 +1555,218 @@ def create_app(
 
         return await to_thread.run_sync(_handle)
 
+    def _admin_users_response(
+        request: Request,
+        *,
+        notice: str | None = None,
+        error: str | None = None,
+        status_code: int = 200,
+    ) -> Response:
+        """Render the user-management page with current accounts and invites."""
+
+        return Response(
+            content=_render_admin_users_page(
+                store.list_users(),
+                store.list_pending_invites(),
+                notice=notice,
+                error=error,
+                csrf_token=_csrf_token_from(request),
+                user=request.scope.get("user"),
+            ),
+            media_type="text/html",
+            status_code=status_code,
+        )
+
+    @get("/admin/users", guards=[requires_admin])
+    async def admin_users_page(
+        request: Request, saved: FromQuery[str | None] = None
+    ) -> Response:
+        """Render account and invitation management."""
+
+        notices = {
+            "role": "Role updated.",
+            "deactivated": "Account deactivated.",
+            "reactivated": "Account reactivated.",
+            "revoked": "Invitation revoked.",
+        }
+        return await to_thread.run_sync(
+            lambda: _admin_users_response(request, notice=notices.get(saved or ""))
+        )
+
+    def _log_admin_action(
+        request: Request, event: str, message: str, **context: object
+    ) -> None:
+        actor = request.scope.get("user")
+        store.log(
+            level="info",
+            event=event,
+            message=message,
+            context={"actor": actor.email if actor else None, **context},
+        )
+
+    @post("/admin/users/{user_id:int}/role", guards=[requires_admin])
+    async def set_user_role(
+        request: Request,
+        user_id: FromPath[int],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Move one account to another role tier."""
+
+        admin = request.scope.get("user")
+        role_value = _form_string(data, "role")
+
+        def _handle() -> Redirect | Response:
+            try:
+                role = UserRole(role_value)
+            except ValueError:
+                return _admin_users_response(
+                    request, error="Choose a valid role.", status_code=400
+                )
+            if admin is not None and admin.id == user_id:
+                return _admin_users_response(
+                    request,
+                    error="You cannot change your own role.",
+                    status_code=400,
+                )
+            target = store.update_user(user_id, role=role)
+            if target is None:
+                return Response("Not found", status_code=404)
+            _log_admin_action(
+                request,
+                "user_role_changed",
+                f"Role of {target.email} set to {role.value}.",
+                subject=target.email,
+                role=role.value,
+            )
+            return Redirect("/admin/users?saved=role", status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
+    @post("/admin/users/{user_id:int}/deactivate", guards=[requires_admin])
+    async def deactivate_user(
+        request: Request, user_id: FromPath[int]
+    ) -> Redirect | Response:
+        """Lock one account out; takes effect on its next request."""
+
+        admin = request.scope.get("user")
+
+        def _handle() -> Redirect | Response:
+            if admin is not None and admin.id == user_id:
+                return _admin_users_response(
+                    request,
+                    error="You cannot deactivate your own account.",
+                    status_code=400,
+                )
+            target = store.update_user(user_id, is_active=False)
+            if target is None:
+                return Response("Not found", status_code=404)
+            _log_admin_action(
+                request,
+                "user_deactivated",
+                f"Account {target.email} deactivated.",
+                subject=target.email,
+            )
+            return Redirect("/admin/users?saved=deactivated", status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
+    @post("/admin/users/{user_id:int}/reactivate", guards=[requires_admin])
+    async def reactivate_user(
+        request: Request, user_id: FromPath[int]
+    ) -> Redirect | Response:
+        """Restore a deactivated account."""
+
+        def _handle() -> Redirect | Response:
+            target = store.update_user(user_id, is_active=True)
+            if target is None:
+                return Response("Not found", status_code=404)
+            _log_admin_action(
+                request,
+                "user_reactivated",
+                f"Account {target.email} reactivated.",
+                subject=target.email,
+            )
+            return Redirect("/admin/users?saved=reactivated", status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
+    @post(
+        "/admin/users/{user_id:int}/reset-link",
+        status_code=200,
+        guards=[requires_admin],
+    )
+    async def create_reset_link(
+        request: Request, user_id: FromPath[int]
+    ) -> Response:
+        """Generate a password reset link for one account."""
+
+        def _prepare() -> tuple[str, str, datetime] | None:
+            target = store.get_user(user_id)
+            if target is None:
+                return None
+            store.delete_auth_tokens(purpose="password_reset", user_id=target.id)
+            raw, hashed = generate_token()
+            expires_at = datetime.now(UTC) + RESET_TTL
+            store.create_auth_token(
+                purpose="password_reset",
+                token_hash=hashed,
+                email=target.email,
+                user_id=target.id,
+                expires_at=expires_at,
+            )
+            _log_admin_action(
+                request,
+                "user_reset_link_created",
+                f"Password reset link created for {target.email}.",
+                subject=target.email,
+            )
+            return (target.email, raw, expires_at)
+
+        created = await to_thread.run_sync(_prepare)
+        if created is None:
+            return Response("Not found", status_code=404)
+        email, raw, expires_at = created
+        reset_url = _absolute_url(request, base_url, f"/password-reset/{raw}")
+        email_sent = True
+        try:
+            await send_password_reset_email(
+                email_config, to=email, reset_url=reset_url, expires_at=expires_at
+            )
+        except EmailError:
+            logger.exception("Password reset email to %s failed to send", email)
+            email_sent = False
+        return Response(
+            content=_render_reset_link_page(
+                email=email,
+                reset_url=reset_url,
+                email_sent=email_sent,
+                expires_at=expires_at,
+                csrf_token=_csrf_token_from(request),
+                user=request.scope.get("user"),
+            ),
+            media_type="text/html",
+        )
+
+    @post("/admin/invites/{invite_id:int}/revoke", guards=[requires_admin])
+    async def revoke_invite(
+        request: Request, invite_id: FromPath[int]
+    ) -> Redirect:
+        """Withdraw one pending invitation."""
+
+        def _handle() -> Redirect:
+            store.delete_auth_token(invite_id)
+            _log_admin_action(
+                request,
+                "invite_revoked",
+                f"Invitation {invite_id} revoked.",
+                invite_id=invite_id,
+            )
+            return Redirect("/admin/users?saved=revoked", status_code=303)
+
+        return await to_thread.run_sync(_handle)
+
     @get("/", sync_to_thread=True)
     def index(
         request: Request,
@@ -1743,6 +2134,16 @@ def create_app(
                     media_type="text/html",
                     status_code=400,
                 )
+            actor = request.scope.get("user")
+            store.log(
+                level="info",
+                event="venue_approved",
+                message=f"Venue {venue_id} approved via the editorial UI.",
+                context={
+                    "actor": actor.email if actor else None,
+                    "venue_id": venue_id,
+                },
+            )
             destination = (
                 f"/venues/{venue_id}"
                 if current is not None and current.status is VenueStatus.VERIFIED
@@ -1858,6 +2259,16 @@ def create_app(
                     media_type="text/html",
                     status_code=400,
                 )
+            actor = request.scope.get("user")
+            store.log(
+                level="info",
+                event="artist_approved",
+                message=f"Artist {artist_id} reviewed via the editorial UI.",
+                context={
+                    "actor": actor.email if actor else None,
+                    "artist_id": artist_id,
+                },
+            )
             destination = (
                 f"/artists/{artist_id}"
                 if current is not None and current.status is ArtistStatus.VERIFIED
@@ -2157,6 +2568,12 @@ def create_app(
             do_password_reset,
             account_page,
             save_account,
+            admin_users_page,
+            set_user_role,
+            deactivate_user,
+            reactivate_user,
+            create_reset_link,
+            revoke_invite,
             create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
         ],
         middleware=[
@@ -2376,6 +2793,13 @@ def _render_settings_page(
             <small class="hint">How many rows are shown by default in recently added, upcoming, and venue tables.</small>
             <br /><button type="submit">Save settings</button>
           </form>
+        </section>
+        <section class="settings-card">
+          <p class="section-label">Access</p>
+          <h2>User management</h2>
+          <p>Invite people, change roles, generate password reset links, and
+          deactivate accounts.</p>
+          <p><a href="/admin/users">Manage users →</a></p>
         </section>
         <section class="settings-card">
           <p class="section-label">Application info</p>

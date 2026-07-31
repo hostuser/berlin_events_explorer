@@ -671,6 +671,14 @@ class EventStore:
                 .values(used_at=datetime.now(timezone.utc))
             )
 
+    def delete_auth_token(self, token_id: int) -> None:
+        """Revoke one outstanding token by primary key."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(auth_tokens_table).where(auth_tokens_table.c.id == token_id)
+            )
+
     def delete_auth_tokens(
         self,
         *,

@@ -630,3 +630,183 @@ def test_reset_form_validates_the_password(tmp_path: Path) -> None:
                 follow_redirects=False,
             )
             assert response.status_code == 400, payload
+
+
+def test_admin_users_page_lists_accounts_and_invites(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="admin")
+        seed_user(
+            client.app.state.store, email="editor@example.test", role=UserRole.EDITOR
+        )
+        _create_invite(client, email="pending@example.test", role="editor")
+
+        response = client.get("/admin/users")
+
+        assert response.status_code == 200
+        assert "editor@example.test" in response.text
+        assert "pending@example.test" in response.text
+
+
+def test_admin_pages_reject_non_admins(tmp_path: Path) -> None:
+    for role in ("user", "editor"):
+        with TestClient(_app(tmp_path)) as client:
+            login_as(client, role=role)
+            assert client.get("/admin/users").status_code == 403, role
+
+
+def test_role_changes_apply_on_the_targets_next_request(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as target:
+        member = login_as(target, role="user", email="member@example.test")
+        assert target.get("/approvals/venues/x").status_code == 403
+
+        with TestClient(app) as admin:
+            login_as(admin, role="admin")
+            response = admin.post(
+                f"/admin/users/{member.id}/role",
+                data={"role": "editor"},
+                headers=_csrf_headers(admin),
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+
+        assert target.get("/approvals/venues/x").status_code == 404
+
+
+def test_deactivation_and_reactivation_from_the_admin_page(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as target:
+        member = login_as(target, role="editor", email="member@example.test")
+        assert target.get("/approvals/venues/x").status_code == 404
+
+        with TestClient(app) as admin:
+            login_as(admin, role="admin")
+            deactivate = admin.post(
+                f"/admin/users/{member.id}/deactivate",
+                headers=_csrf_headers(admin),
+                follow_redirects=False,
+            )
+            assert deactivate.status_code == 303
+
+            response = target.get("/approvals/venues/x", follow_redirects=False)
+            assert response.status_code == 303
+
+            reactivate = admin.post(
+                f"/admin/users/{member.id}/reactivate",
+                headers=_csrf_headers(admin),
+                follow_redirects=False,
+            )
+            assert reactivate.status_code == 303
+
+        assert target.get("/approvals/venues/x").status_code == 404
+
+
+def test_admins_cannot_lock_themselves_out(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        admin = login_as(client, role="admin")
+
+        deactivate = client.post(
+            f"/admin/users/{admin.id}/deactivate",
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+        demote = client.post(
+            f"/admin/users/{admin.id}/role",
+            data={"role": "editor"},
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+
+        assert deactivate.status_code == 400
+        assert demote.status_code == 400
+        refreshed = client.app.state.store.get_user(admin.id)
+        assert refreshed is not None
+        assert refreshed.is_active is True
+        assert refreshed.role is UserRole.ADMIN
+
+
+def test_admin_reset_link_works_end_to_end(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as admin:
+        login_as(admin, role="admin")
+        member = seed_user(
+            app.state.store, email="member@example.test", role=UserRole.USER
+        )
+
+        response = admin.post(
+            f"/admin/users/{member.id}/reset-link",
+            headers=_csrf_headers(admin),
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 200
+        reset_path = _reset_url_from_outbox()
+        assert reset_path in response.text
+
+    with TestClient(app) as member_client:
+        member_client.get(reset_path)
+        done = member_client.post(
+            reset_path,
+            data={
+                "password": "an-admin-issued-password",
+                "password_repeat": "an-admin-issued-password",
+            },
+            headers=_csrf_headers(member_client),
+            follow_redirects=False,
+        )
+        assert done.status_code == 303
+        assert (
+            _login_post(
+                member_client, "member@example.test", "an-admin-issued-password"
+            ).status_code
+            == 303
+        )
+
+
+def test_pending_invites_can_be_revoked(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="admin")
+        _create_invite(client, email="pending@example.test")
+        invite_path = _invite_url_from_outbox()
+        store = client.app.state.store
+        (pending,) = store.list_pending_invites()
+
+        response = client.post(
+            f"/admin/invites/{pending.id}/revoke",
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert store.list_pending_invites() == []
+        assert "invalid or has expired" in client.get(invite_path).text
+
+
+def test_admin_actions_record_the_acting_account(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        admin = login_as(client, role="admin")
+        member = seed_user(
+            client.app.state.store, email="member@example.test", role=UserRole.USER
+        )
+
+        client.post(
+            f"/admin/users/{member.id}/role",
+            data={"role": "editor"},
+            headers=_csrf_headers(client),
+            follow_redirects=False,
+        )
+
+        entries = [
+            entry
+            for entry in client.app.state.store.list_logs(level="info")
+            if entry.event == "user_role_changed"
+        ]
+        assert entries
+        assert entries[-1].context["actor"] == admin.email
+        assert entries[-1].context["role"] == "editor"
+
+
+def test_settings_page_links_to_user_management(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="admin")
+        assert 'href="/admin/users"' in client.get("/settings").text

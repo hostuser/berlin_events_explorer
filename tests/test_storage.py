@@ -883,3 +883,31 @@ def test_clear_application_data_preserves_accounts(tmp_path) -> None:
         tab="upcoming", recent_days=7, search="", page=1, page_size=10
     )
     assert total == 0
+
+
+def test_delete_auth_token_removes_exactly_one_token(tmp_path) -> None:
+    """Revoking one invite must not disturb any other outstanding token."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    expires = datetime.now(UTC) + timedelta(days=1)
+    store.create_auth_token(
+        purpose="invite",
+        token_hash="invite-a",
+        email="a@example.org",
+        role=UserRole.USER,
+        expires_at=expires,
+    )
+    store.create_auth_token(
+        purpose="invite",
+        token_hash="invite-b",
+        email="b@example.org",
+        role=UserRole.USER,
+        expires_at=expires,
+    )
+    token = store.get_auth_token("invite-a", purpose="invite")
+    assert token is not None
+
+    store.delete_auth_token(token.id)
+
+    assert store.get_auth_token("invite-a", purpose="invite") is None
+    assert store.get_auth_token("invite-b", purpose="invite") is not None
