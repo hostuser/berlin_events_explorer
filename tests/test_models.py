@@ -11,6 +11,8 @@ from berlin_events_explorer.models import (
     EventSourceRef,
     EventStatus,
     Performer,
+    UserRecord,
+    UserRole,
     Venue,
     VenueCandidate,
     VenueMetadata,
@@ -159,3 +161,42 @@ def test_venue_candidate_retains_osm_identity_and_discovered_details() -> None:
 
     assert candidate.osm_id == "1"
     assert candidate.address == "Am Wriezener Bahnhof, 10243 Berlin"
+
+
+def _user_record(**overrides) -> UserRecord:
+    """Return a representative account record."""
+
+    now = datetime(2026, 8, 1, tzinfo=UTC)
+    fields = {
+        "id": 1,
+        "email": "markus@example.org",
+        "display_name": "Markus",
+        "role": UserRole.EDITOR,
+        "is_active": True,
+        "created_at": now,
+        "updated_at": now,
+        "last_login_at": None,
+    }
+    fields.update(overrides)
+    return UserRecord(**fields)
+
+
+def test_user_record_normalizes_email_to_lowercase() -> None:
+    """Emails must compare case-insensitively, so records store them folded."""
+
+    user = _user_record(email="  Markus@Example.ORG ")
+
+    assert user.email == "markus@example.org"
+
+
+def test_user_record_rejects_email_without_at_sign() -> None:
+    """A user record without a deliverable address is a data error."""
+
+    with pytest.raises(ValidationError):
+        _user_record(email="not-an-email")
+
+
+def test_user_record_never_carries_a_password_hash() -> None:
+    """Credential material must stay out of records that reach templates."""
+
+    assert "password_hash" not in UserRecord.model_fields

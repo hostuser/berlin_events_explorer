@@ -1,5 +1,6 @@
-h1:yRfuJwvwi76kiJGFBzM5AMbNLkzePYCxdGuTsmlxkAg=
+h1:Xb+LhFWNJaRavfpFue2RqWXO4BdzoMZ2aPbWUonIMDQ=
 20260731120000_initial_schema.sql h1:maqPh1qxA7KRnvDLZKcuku1VNVdM/x6xjLO4Yqpqz9g=
 20260731120001_add_worker_runs.sql h1:nFMK9gzBKyGBuZgsU1Gh1WLq7rwL+KhRgVNmi3kTjIk=
 20260731120002_add_venue_district.sql h1:yuoOyx9H8JFWM5QLjYeMpuqpwBosWFR7tp+vbCnHuSk=
 20260731130000_add_event_query_columns.sql h1:nrIutQJsP5rEGumDAWJ5gJsAUgEtUloLriPvw/r0gis=
+20260731223216_add_user_accounts.sql h1:ow5OpyMCJSOlZI3oAO3I/J/zkRWKcc8AnJwCECxFpy0=

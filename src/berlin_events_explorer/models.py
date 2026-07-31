@@ -329,3 +329,42 @@ def event_search_text(event: Event) -> str:
         parts.append(event.venue.name)
     parts.extend(performer.name for performer in event.performers)
     return " ".join(parts).casefold()
+
+
+class UserRole(str, Enum):
+    """Authorization tier of an account, ordered user < editor < admin."""
+
+    USER = "user"
+    EDITOR = "editor"
+    ADMIN = "admin"
+
+
+def normalize_email(value: str) -> str:
+    """Fold an address so storage and lookups are case-insensitive."""
+
+    value = value.strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+        raise ValueError("email must be a valid address")
+    return value
+
+
+class UserRecord(BaseModel):
+    """One account, without credential material."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    email: str
+    display_name: str
+    role: UserRole
+    is_active: bool = True
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: datetime | None = None
+
+    @field_validator("email")
+    @classmethod
+    def email_must_be_a_normalized_address(cls, value: str) -> str:
+        """Fold addresses so lookups and uniqueness are case-insensitive."""
+
+        return normalize_email(value)

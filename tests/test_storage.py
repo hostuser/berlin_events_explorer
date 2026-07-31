@@ -15,6 +15,7 @@ from berlin_events_explorer.models import (
     Venue,
     VenueCandidate,
     VenueMetadata,
+    UserRole,
     VenueRecord,
     VenueStatus,
 )
@@ -660,3 +661,225 @@ def test_event_performer_links_can_be_limited_to_verified_artists(tmp_path) -> N
         (event.id, 2): "unresolved-artist",
     }
     assert verified_links == {(event.id, 1): "verified-artist"}
+
+
+def _seed_user(
+    store: EventStore,
+    *,
+    email: str = "markus@example.org",
+    password_hash: str = "argon2-hash",
+    display_name: str = "Markus",
+    role: UserRole = UserRole.EDITOR,
+):
+    """Create an account with representative defaults."""
+
+    return store.create_user(
+        email=email,
+        password_hash=password_hash,
+        display_name=display_name,
+        role=role,
+    )
+
+
+def test_create_user_roundtrips_and_normalizes_email(tmp_path) -> None:
+    """Accounts persist with folded emails and timezone-aware timestamps."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+
+    user = _seed_user(store, email="Markus@Example.ORG")
+
+    assert user.email == "markus@example.org"
+    assert user.role is UserRole.EDITOR
+    assert user.is_active is True
+    assert user.created_at.tzinfo is not None
+    assert store.get_user(user.id) == user
+    credentials = store.get_user_credentials("MARKUS@example.org")
+    assert credentials is not None
+    assert credentials.user == user
+    assert credentials.password_hash == "argon2-hash"
+    assert store.list_users() == [user]
+
+
+def test_create_user_rejects_duplicate_email(tmp_path) -> None:
+    """A second account for the same address must be refused, whatever the case."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    _seed_user(store)
+
+    with pytest.raises(ValueError, match="already exists"):
+        _seed_user(store, email="MARKUS@example.org", display_name="Impostor")
+
+
+def test_update_user_applies_partial_changes(tmp_path) -> None:
+    """Only supplied fields change; the update timestamp moves forward."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    user = _seed_user(store)
+
+    updated = store.update_user(user.id, role=UserRole.ADMIN, is_active=False)
+
+    assert updated is not None
+    assert updated.role is UserRole.ADMIN
+    assert updated.is_active is False
+    assert updated.display_name == "Markus"
+    assert updated.updated_at >= user.updated_at
+
+    store.update_user(user.id, password_hash="new-hash")
+    credentials = store.get_user_credentials(user.email)
+    assert credentials is not None
+    assert credentials.password_hash == "new-hash"
+    assert store.update_user(9999, role=UserRole.USER) is None
+
+
+def test_record_user_login_sets_last_login_at(tmp_path) -> None:
+    """Successful logins leave an operational trace on the account."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    user = _seed_user(store)
+    assert user.last_login_at is None
+
+    store.record_user_login(user.id)
+
+    refreshed = store.get_user(user.id)
+    assert refreshed is not None
+    assert refreshed.last_login_at is not None
+
+
+def test_count_admins_counts_only_active_admins(tmp_path) -> None:
+    """Lockout checks need the number of remaining usable admin accounts."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    _seed_user(store, email="editor@example.org", role=UserRole.EDITOR)
+    admin = _seed_user(store, email="admin@example.org", role=UserRole.ADMIN)
+    _seed_user(store, email="admin2@example.org", role=UserRole.ADMIN)
+
+    assert store.count_admins() == 2
+
+    store.update_user(admin.id, is_active=False)
+    assert store.count_admins() == 1
+
+
+def test_auth_token_lifecycle(tmp_path) -> None:
+    """Tokens are stored hashed, looked up by purpose, and single-use."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    admin = _seed_user(store, email="admin@example.org", role=UserRole.ADMIN)
+    expires = datetime.now(UTC) + timedelta(days=7)
+
+    store.create_auth_token(
+        purpose="invite",
+        token_hash="hash-1",
+        email="invitee@example.org",
+        role=UserRole.USER,
+        created_by=admin.id,
+        expires_at=expires,
+    )
+
+    token = store.get_auth_token("hash-1", purpose="invite")
+    assert token is not None
+    assert token.email == "invitee@example.org"
+    assert token.role is UserRole.USER
+    assert token.created_by == admin.id
+    assert token.used_at is None
+    assert token.expires_at.tzinfo is not None
+    assert store.get_auth_token("hash-1", purpose="password_reset") is None
+    assert store.get_auth_token("missing", purpose="invite") is None
+
+    assert [pending.email for pending in store.list_pending_invites()] == [
+        "invitee@example.org"
+    ]
+
+    store.mark_auth_token_used(token.id)
+    used = store.get_auth_token("hash-1", purpose="invite")
+    assert used is not None
+    assert used.used_at is not None
+    assert store.list_pending_invites() == []
+
+
+def test_pending_invites_exclude_expired_tokens(tmp_path) -> None:
+    """An expired invite is dead; it must not linger in the admin queue."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.create_auth_token(
+        purpose="invite",
+        token_hash="hash-expired",
+        email="late@example.org",
+        role=UserRole.USER,
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    assert store.list_pending_invites() == []
+
+
+def test_delete_auth_tokens_scopes_by_purpose_and_subject(tmp_path) -> None:
+    """Regenerating an invite or reset invalidates only its predecessors."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    user = _seed_user(store)
+    expires = datetime.now(UTC) + timedelta(days=1)
+    store.create_auth_token(
+        purpose="invite",
+        token_hash="invite-a",
+        email="invitee@example.org",
+        role=UserRole.USER,
+        expires_at=expires,
+    )
+    store.create_auth_token(
+        purpose="password_reset",
+        token_hash="reset-a",
+        email=user.email,
+        user_id=user.id,
+        expires_at=expires,
+    )
+
+    store.delete_auth_tokens(purpose="invite", email="invitee@example.org")
+
+    assert store.get_auth_token("invite-a", purpose="invite") is None
+    assert store.get_auth_token("reset-a", purpose="password_reset") is not None
+
+    store.delete_auth_tokens(purpose="password_reset", user_id=user.id)
+    assert store.get_auth_token("reset-a", purpose="password_reset") is None
+
+
+def test_user_settings_upsert_and_delete(tmp_path) -> None:
+    """Per-user preferences overwrite cleanly and disappear on delete."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    user = _seed_user(store)
+
+    assert store.get_user_setting(user.id, "default_table_size") is None
+
+    store.set_user_setting(user.id, "default_table_size", 25)
+    assert store.get_user_setting(user.id, "default_table_size") == 25
+
+    store.set_user_setting(user.id, "default_table_size", 50)
+    assert store.get_user_setting(user.id, "default_table_size") == 50
+
+    store.delete_user_setting(user.id, "default_table_size")
+    assert store.get_user_setting(user.id, "default_table_size") is None
+
+
+def test_clear_application_data_preserves_accounts(tmp_path) -> None:
+    """Clearing synced content must never destroy accounts or their settings."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    user = _seed_user(store)
+    store.set_user_setting(user.id, "default_table_size", 25)
+    store.create_auth_token(
+        purpose="invite",
+        token_hash="hash-1",
+        email="invitee@example.org",
+        role=UserRole.USER,
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+    )
+    store.upsert(_event())
+
+    store.clear_application_data()
+
+    assert store.get_user(user.id) == user
+    assert store.get_user_setting(user.id, "default_table_size") == 25
+    assert store.get_auth_token("hash-1", purpose="invite") is None
+    _events, total, _pages, _page = store.query_events(
+        tab="upcoming", recent_days=7, search="", page=1, page_size=10
+    )
+    assert total == 0

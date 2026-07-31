@@ -37,7 +37,15 @@ def test_migrate_database_creates_current_schema_and_records_revision(tmp_path) 
             )
         }
 
-    assert {"events", "venues", "artists", "atlas_schema_revisions"} <= tables
+    assert {
+        "events",
+        "venues",
+        "artists",
+        "users",
+        "auth_tokens",
+        "user_settings",
+        "atlas_schema_revisions",
+    } <= tables
 
 
 def test_database_migrate_command_applies_pending_migrations(tmp_path) -> None:

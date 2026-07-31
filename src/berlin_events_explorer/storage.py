@@ -6,11 +6,12 @@ import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from sqlalchemy import (
     JSON,
     and_,
+    Boolean,
     case,
     Column,
     Computed,
@@ -36,6 +37,7 @@ from sqlalchemy import (
 )
 
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 
 from berlin_events_explorer.migrations import migrate_database
 from berlin_events_explorer.models import (
@@ -44,11 +46,14 @@ from berlin_events_explorer.models import (
     ArtistRecord,
     ArtistStatus,
     Event,
+    UserRecord,
+    UserRole,
     VenueCandidate,
     VenueMetadata,
     VenueRecord,
     VenueStatus,
     event_search_text,
+    normalize_email,
 )
 
 
@@ -284,6 +289,46 @@ settings_table = Table(
     Column("value_json", JSON, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
+users_table = Table(
+    "users",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("email", String, nullable=False, unique=True),
+    Column("password_hash", String, nullable=False),
+    Column("display_name", String, nullable=False),
+    Column("role", String(20), nullable=False),
+    Column("is_active", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("last_login_at", DateTime(timezone=True)),
+)
+auth_tokens_table = Table(
+    "auth_tokens",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("purpose", String(30), nullable=False, index=True),
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("email", String, nullable=False),
+    Column("role", String(20)),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE")),
+    Column("created_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("used_at", DateTime(timezone=True)),
+)
+user_settings_table = Table(
+    "user_settings",
+    metadata,
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("key", String(100), primary_key=True),
+    Column("value_json", JSON, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
 
 
 @dataclass(frozen=True)
@@ -330,6 +375,29 @@ class WorkerRun:
     status: str
     error: str | None
     summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class UserCredentials:
+    """An account together with its password hash, for login checks only."""
+
+    user: UserRecord
+    password_hash: str
+
+
+@dataclass(frozen=True)
+class AuthToken:
+    """One single-use invite or password-reset token, stored hashed."""
+
+    id: int
+    purpose: str
+    email: str
+    role: UserRole | None
+    user_id: int | None
+    created_by: int | None
+    created_at: datetime
+    expires_at: datetime
+    used_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -408,6 +476,277 @@ class EventStore:
         )
         with self.engine.begin() as connection:
             connection.execute(statement)
+
+    def create_user(
+        self,
+        *,
+        email: str,
+        password_hash: str,
+        display_name: str,
+        role: UserRole,
+        is_active: bool = True,
+    ) -> UserRecord:
+        """Create one account; reject addresses that are already registered."""
+
+        email = normalize_email(email)
+        now = datetime.now(timezone.utc)
+        try:
+            with self.engine.begin() as connection:
+                result = connection.execute(
+                    insert(users_table).values(
+                        email=email,
+                        password_hash=password_hash,
+                        display_name=display_name,
+                        role=role.value,
+                        is_active=is_active,
+                        created_at=now,
+                        updated_at=now,
+                        last_login_at=None,
+                    )
+                )
+        except IntegrityError as error:
+            raise ValueError(f"A user with email {email!r} already exists") from error
+        primary_key = result.inserted_primary_key
+        if primary_key is None or not isinstance(primary_key[0], int):
+            raise RuntimeError("SQLite did not return a user ID")
+        return UserRecord(
+            id=primary_key[0],
+            email=email,
+            display_name=display_name,
+            role=role,
+            is_active=is_active,
+            created_at=now,
+            updated_at=now,
+            last_login_at=None,
+        )
+
+    def get_user(self, user_id: int) -> UserRecord | None:
+        """Return one account by primary key."""
+
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(users_table).where(users_table.c.id == user_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _user_from_row(row) if row is not None else None
+
+    def get_user_credentials(self, email: str) -> UserCredentials | None:
+        """Return the account and password hash registered for an address."""
+
+        try:
+            email = normalize_email(email)
+        except ValueError:
+            return None
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(users_table).where(users_table.c.email == email)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            return None
+        return UserCredentials(
+            user=_user_from_row(row), password_hash=row["password_hash"]
+        )
+
+    def list_users(self) -> list[UserRecord]:
+        """Return every account, oldest first."""
+
+        with self.engine.connect() as connection:
+            rows = (
+                connection.execute(select(users_table).order_by(users_table.c.id))
+                .mappings()
+                .all()
+            )
+        return [_user_from_row(row) for row in rows]
+
+    def count_admins(self) -> int:
+        """Return how many active admin accounts remain."""
+
+        with self.engine.connect() as connection:
+            count = connection.execute(
+                select(func.count())
+                .select_from(users_table)
+                .where(
+                    users_table.c.role == UserRole.ADMIN.value,
+                    users_table.c.is_active,
+                )
+            ).scalar_one()
+        return int(count)
+
+    def update_user(
+        self,
+        user_id: int,
+        *,
+        display_name: str | None = None,
+        role: UserRole | None = None,
+        is_active: bool | None = None,
+        password_hash: str | None = None,
+    ) -> UserRecord | None:
+        """Apply the supplied account changes and return the updated record."""
+
+        values: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+        if display_name is not None:
+            values["display_name"] = display_name
+        if role is not None:
+            values["role"] = role.value
+        if is_active is not None:
+            values["is_active"] = is_active
+        if password_hash is not None:
+            values["password_hash"] = password_hash
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(users_table).where(users_table.c.id == user_id).values(**values)
+            )
+            if result.rowcount == 0:
+                return None
+        return self.get_user(user_id)
+
+    def record_user_login(self, user_id: int) -> None:
+        """Note a successful login on the account."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(users_table)
+                .where(users_table.c.id == user_id)
+                .values(last_login_at=datetime.now(timezone.utc))
+            )
+
+    def create_auth_token(
+        self,
+        *,
+        purpose: str,
+        token_hash: str,
+        email: str,
+        role: UserRole | None = None,
+        user_id: int | None = None,
+        created_by: int | None = None,
+        expires_at: datetime,
+    ) -> None:
+        """Store the hash of one single-use invite or password-reset token."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(auth_tokens_table).values(
+                    purpose=purpose,
+                    token_hash=token_hash,
+                    email=normalize_email(email),
+                    role=role.value if role is not None else None,
+                    user_id=user_id,
+                    created_by=created_by,
+                    created_at=datetime.now(timezone.utc),
+                    expires_at=expires_at,
+                    used_at=None,
+                )
+            )
+
+    def get_auth_token(self, token_hash: str, *, purpose: str) -> AuthToken | None:
+        """Return the stored token matching a hash, regardless of validity."""
+
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(auth_tokens_table).where(
+                        auth_tokens_table.c.token_hash == token_hash,
+                        auth_tokens_table.c.purpose == purpose,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _auth_token_from_row(row) if row is not None else None
+
+    def mark_auth_token_used(self, token_id: int) -> None:
+        """Consume a token so it can never authorize a second action."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(auth_tokens_table)
+                .where(auth_tokens_table.c.id == token_id)
+                .values(used_at=datetime.now(timezone.utc))
+            )
+
+    def delete_auth_tokens(
+        self,
+        *,
+        purpose: str,
+        email: str | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        """Invalidate outstanding tokens for one purpose and subject."""
+
+        conditions = [auth_tokens_table.c.purpose == purpose]
+        if email is not None:
+            conditions.append(auth_tokens_table.c.email == normalize_email(email))
+        if user_id is not None:
+            conditions.append(auth_tokens_table.c.user_id == user_id)
+        with self.engine.begin() as connection:
+            connection.execute(delete(auth_tokens_table).where(*conditions))
+
+    def list_pending_invites(self) -> list[AuthToken]:
+        """Return unused, unexpired invites, oldest first."""
+
+        with self.engine.connect() as connection:
+            rows = (
+                connection.execute(
+                    select(auth_tokens_table)
+                    .where(
+                        auth_tokens_table.c.purpose == "invite",
+                        auth_tokens_table.c.used_at.is_(None),
+                        auth_tokens_table.c.expires_at > datetime.now(timezone.utc),
+                    )
+                    .order_by(auth_tokens_table.c.id)
+                )
+                .mappings()
+                .all()
+            )
+        return [_auth_token_from_row(row) for row in rows]
+
+    def get_user_setting(self, user_id: int, key: str) -> Any | None:
+        """Return one persisted per-user preference, if set."""
+
+        with self.engine.connect() as connection:
+            return connection.execute(
+                select(user_settings_table.c.value_json).where(
+                    user_settings_table.c.user_id == user_id,
+                    user_settings_table.c.key == key,
+                )
+            ).scalar_one_or_none()
+
+    def set_user_setting(self, user_id: int, key: str, value: Any) -> None:
+        """Persist one per-user preference as a JSON-compatible value."""
+
+        statement = sqlite_insert(user_settings_table).values(
+            user_id=user_id,
+            key=key,
+            value_json=value,
+            updated_at=datetime.now(timezone.utc),
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[user_settings_table.c.user_id, user_settings_table.c.key],
+            set_={
+                "value_json": statement.excluded.value_json,
+                "updated_at": statement.excluded.updated_at,
+            },
+        )
+        with self.engine.begin() as connection:
+            connection.execute(statement)
+
+    def delete_user_setting(self, user_id: int, key: str) -> None:
+        """Drop one per-user preference so the site default applies again."""
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                delete(user_settings_table).where(
+                    user_settings_table.c.user_id == user_id,
+                    user_settings_table.c.key == key,
+                )
+            )
 
     def start_worker_run(self) -> WorkerRun:
         """Record a worker invocation before it begins its first external phase."""
@@ -496,10 +835,11 @@ class EventStore:
         return _worker_run_from_row(row) if row is not None else None
 
     def clear_application_data(self) -> None:
-        """Delete synchronized content while preserving application settings."""
+        """Delete synchronized content, keeping settings and user accounts."""
 
         with self.engine.begin() as connection:
             for table in (
+                auth_tokens_table,
                 artist_metadata_table,
                 artist_candidates_table,
                 event_artists_table,
@@ -1687,6 +2027,49 @@ class EventStore:
                 )
                 for row in rows
             ]
+
+
+@overload
+def _as_utc(value: datetime) -> datetime: ...
+@overload
+def _as_utc(value: None) -> None: ...
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Re-attach the UTC zone SQLite drops from stored timestamps."""
+
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _user_from_row(row: Any) -> UserRecord:
+    """Convert SQLite account data into a credential-free record."""
+
+    return UserRecord(
+        id=row["id"],
+        email=row["email"],
+        display_name=row["display_name"],
+        role=UserRole(row["role"]),
+        is_active=bool(row["is_active"]),
+        created_at=_as_utc(row["created_at"]),
+        updated_at=_as_utc(row["updated_at"]),
+        last_login_at=_as_utc(row["last_login_at"]),
+    )
+
+
+def _auth_token_from_row(row: Any) -> AuthToken:
+    """Convert SQLite token data into its dataclass, hash excluded."""
+
+    return AuthToken(
+        id=row["id"],
+        purpose=row["purpose"],
+        email=row["email"],
+        role=UserRole(row["role"]) if row["role"] is not None else None,
+        user_id=row["user_id"],
+        created_by=row["created_by"],
+        created_at=_as_utc(row["created_at"]),
+        expires_at=_as_utc(row["expires_at"]),
+        used_at=_as_utc(row["used_at"]),
+    )
 
 
 def _worker_run_from_row(row: Any) -> WorkerRun:
