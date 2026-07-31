@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - uses: ariga/setup-atlas@v0
       - uses: ./.github/actions/setup-uv-env
         with:
           python-version: ${{ matrix.python_version }}
