@@ -43,16 +43,25 @@ from litestar.response import Redirect, Response, Stream
 from litestar.static_files import create_static_files_router
 from litestar.stores.file import FileStore
 from litestar.utils.scope.state import ScopeState
+from litestar_email import EmailConfig, EmailError
 from pydantic import ValidationError
 
 from berlin_events_explorer.auth import (
+    INVITE_TTL,
     ROLE_ORDER,
     SESSION_USER_KEY,
     SessionUserAuthMiddleware,
     dummy_password_hash,
+    generate_token,
+    hash_password,
+    hash_token,
     requires_admin,
     requires_editor,
     verify_password,
+)
+from berlin_events_explorer.emails import (
+    email_config_from_env,
+    send_invite_email,
 )
 
 from berlin_events_explorer.artist_enrichment import (
@@ -71,6 +80,7 @@ from berlin_events_explorer.models import (
     Event,
     UserRecord,
     UserRole,
+    normalize_email,
     VenueCandidate,
     VenueMetadata,
     VenueRecord,
@@ -79,7 +89,7 @@ from berlin_events_explorer.models import (
 )
 from berlin_events_explorer import theme
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
-from berlin_events_explorer.storage import EventStore, VenueSummary
+from berlin_events_explorer.storage import AuthToken, EventStore, VenueSummary
 from berlin_events_explorer.sync import SyncError, open_sync_cache
 from berlin_events_explorer.venue_enrichment import (
     DEFAULT_AUTO_APPROVE_THRESHOLD,
@@ -238,6 +248,136 @@ def _render_login_page(
     </main>
   </body>
 </html>"""
+
+
+def _absolute_url(request: Request, base_url: str | None, path: str) -> str:
+    """Build an externally reachable URL for links that leave the site."""
+
+    root = (base_url or str(request.base_url)).rstrip("/")
+    return f"{root}{path}"
+
+
+def _render_invalid_token_page(message: str) -> str:
+    """Render one generic page for unusable invite or reset links."""
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Link expired · Berlin Events Explorer</title>
+    {theme.head_assets()}
+  </head>
+  <body class="login-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main">
+      <section class="card">
+        <h1>Link expired</h1>
+        <p>{escape(message)}</p>
+        <a class="back-link" href="/">← Back to events</a>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def _render_invite_accept_page(
+    action_path: str,
+    email: str,
+    *,
+    display_name: str = "",
+    error: str | None = None,
+    csrf_token: str | None = None,
+) -> str:
+    """Render the form on which an invitee activates their account."""
+
+    error_html = f'<p class="notice error">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Accept invitation · Berlin Events Explorer</title>
+    {theme.head_assets()}
+  </head>
+  <body class="login-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main">
+      <section class="card">
+        <h1>Welcome</h1>
+        <p>Set up your account for <strong>{escape(email)}</strong>.</p>
+        {error_html}
+        <form method="post" action="{escape(action_path, quote=True)}">
+          {_csrf_input(csrf_token)}
+          <label for="display-name">Display name</label>
+          <input id="display-name" name="display_name" type="text" required
+                 value="{escape(display_name, quote=True)}" />
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" required
+                 minlength="10" autocomplete="new-password" />
+          <small class="hint">Use at least 10 characters.</small>
+          <label for="password-repeat">Repeat password</label>
+          <input id="password-repeat" name="password_repeat" type="password"
+                 required minlength="10" autocomplete="new-password" />
+          <button type="submit">Create account</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def _render_invite_result_page(
+    *,
+    email: str,
+    role: UserRole | None = None,
+    invite_url: str | None = None,
+    email_sent: bool = False,
+    expires_at: datetime | None = None,
+    error: str | None = None,
+    csrf_token: str | None = None,
+    user: UserRecord | None = None,
+) -> str:
+    """Render the outcome of creating one invite, including its only URL copy."""
+
+    if error:
+        content = f'<p class="notice error">{escape(error)}</p>'
+    else:
+        email_notice = (
+            f'<p class="notice success">Invitation emailed to {escape(email)}.</p>'
+            if email_sent
+            else (
+                '<p class="notice error">The invitation email could not be sent. '
+                "Share the link below yourself.</p>"
+            )
+        )
+        expiry = (
+            f"<p>The link can be used once and expires on "
+            f"{escape(expires_at.date().isoformat())}.</p>"
+            if expires_at
+            else ""
+        )
+        role_label = escape(role.value) if role else "user"
+        content = f"""{email_notice}
+        <section class="settings-card">
+          <p class="section-label">Invitation</p>
+          <h2>{escape(email)} · {role_label}</h2>
+          <p>This link is shown only once — it is stored hashed and cannot be
+          displayed again. Copy it now if you need to share it another way.</p>
+          <input type="text" readonly value="{escape(invite_url or "", quote=True)}"
+                 onfocus="this.select()" aria-label="Invite link" />
+          {expiry}
+        </section>"""
+    return _render_app_page(
+        title="Invite · Berlin Events Explorer",
+        active_tab="admin",
+        content=content,
+        heading="Invitation",
+        kicker="User management",
+        show_sync=False,
+        csrf_token=csrf_token,
+        user=user,
+    )
 
 
 class SyncInProgressError(RuntimeError):
@@ -508,6 +648,8 @@ def create_app(
     sync_interval: timedelta | None = DEFAULT_SYNC_INTERVAL,
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
     environment: str = "production",
+    base_url: str | None = None,
+    email_config: EmailConfig | None = None,
 ) -> Litestar:
     """Create a Litestar app that renders stored events as HTML."""
 
@@ -515,6 +657,8 @@ def create_app(
     if environment not in {"development", "production"}:
         raise ValueError("environment must be 'development' or 'production'")
     csrf_secret = _resolve_csrf_secret(environment)
+    base_url = base_url or os.environ.get("BERLIN_EVENTS_BASE_URL")
+    email_config = email_config or email_config_from_env()
     if store.get_setting("auto_approve_threshold") is None:
         store.set_setting("auto_approve_threshold", auto_approve_threshold)
     if store.get_setting("musicbrainz_request_interval_seconds") is None:
@@ -591,6 +735,195 @@ def create_app(
         """Terminate the session."""
 
         request.clear_session()
+        return Redirect("/", status_code=303)
+
+    def _usable_token(raw: str, *, purpose: str) -> AuthToken | None:
+        """Return the stored token only while it is unused and unexpired."""
+
+        token_record = store.get_auth_token(hash_token(raw), purpose=purpose)
+        if token_record is None or token_record.used_at is not None:
+            return None
+        if token_record.expires_at <= datetime.now(UTC):
+            return None
+        return token_record
+
+    @post("/admin/invites", status_code=200, guards=[requires_admin])
+    async def create_invite(
+        request: Request,
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Response:
+        """Create one single-use invite and surface its only URL copy."""
+
+        admin = request.scope.get("user")
+        role_value = _form_string(data, "role") or "user"
+        raw_email = _form_string(data, "email")
+
+        def _prepare() -> tuple[str | None, str, UserRole, str, datetime | None]:
+            try:
+                role = UserRole(role_value)
+            except ValueError:
+                return ("Choose a valid role.", "", UserRole.USER, raw_email, None)
+            try:
+                email = normalize_email(raw_email)
+            except ValueError:
+                return (
+                    "Enter a valid email address.",
+                    "",
+                    role,
+                    raw_email,
+                    None,
+                )
+            if store.get_user_credentials(email) is not None:
+                return ("This address already has an account.", "", role, email, None)
+            store.delete_auth_tokens(purpose="invite", email=email)
+            raw, hashed = generate_token()
+            expires_at = datetime.now(UTC) + INVITE_TTL
+            store.create_auth_token(
+                purpose="invite",
+                token_hash=hashed,
+                email=email,
+                role=role,
+                created_by=admin.id if admin is not None else None,
+                expires_at=expires_at,
+            )
+            return (None, raw, role, email, expires_at)
+
+        error, raw, role, email, expires_at = await to_thread.run_sync(_prepare)
+        if error is not None:
+            return Response(
+                content=_render_invite_result_page(
+                    email=email,
+                    error=error,
+                    csrf_token=_csrf_token_from(request),
+                    user=admin,
+                ),
+                media_type="text/html",
+                status_code=400,
+            )
+        invite_url = _absolute_url(request, base_url, f"/invites/{raw}")
+        email_sent = True
+        try:
+            await send_invite_email(
+                email_config,
+                to=email,
+                invite_url=invite_url,
+                role=role,
+                expires_at=expires_at or datetime.now(UTC),
+            )
+        except EmailError:
+            logger.exception("Invite email to %s failed to send", email)
+            email_sent = False
+        return Response(
+            content=_render_invite_result_page(
+                email=email,
+                role=role,
+                invite_url=invite_url,
+                email_sent=email_sent,
+                expires_at=expires_at,
+                csrf_token=_csrf_token_from(request),
+                user=admin,
+            ),
+            media_type="text/html",
+        )
+
+    # Shared-path note: like the approval routes, these handlers stay async
+    # and push blocking work to the thread pool (Litestar 2.24 shared-path
+    # sync_to_thread bug).
+    @get("/invites/{token:str}")
+    async def invite_form(request: Request, token: FromPath[str]) -> Response:
+        """Show the account-activation form behind one valid invite link."""
+
+        def _handle() -> Response:
+            token_record = _usable_token(token, purpose="invite")
+            if token_record is None:
+                return Response(
+                    content=_render_invalid_token_page(
+                        "This invite link is invalid or has expired. "
+                        "Ask an administrator for a new invitation."
+                    ),
+                    media_type="text/html",
+                    status_code=404,
+                )
+            return Response(
+                content=_render_invite_accept_page(
+                    f"/invites/{token}",
+                    token_record.email,
+                    csrf_token=_csrf_token_from(request),
+                ),
+                media_type="text/html",
+            )
+
+        return await to_thread.run_sync(_handle)
+
+    @post("/invites/{token:str}")
+    async def accept_invite(
+        request: Request,
+        token: FromPath[str],
+        data: Annotated[
+            dict[str, str], Body(media_type=RequestEncodingType.URL_ENCODED)
+        ],
+    ) -> Redirect | Response:
+        """Create the invited account and log it in."""
+
+        def _handle() -> UserRecord | Response:
+            token_record = _usable_token(token, purpose="invite")
+            if token_record is None:
+                return Response(
+                    content=_render_invalid_token_page(
+                        "This invite link is invalid or has expired. "
+                        "Ask an administrator for a new invitation."
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            display_name = _form_string(data, "display_name").strip()
+            password = _form_string(data, "password")
+            repeat = _form_string(data, "password_repeat")
+            error: str | None = None
+            if not display_name:
+                error = "Enter a display name."
+            elif len(password) < 10:
+                error = "Choose a password of at least 10 characters."
+            elif password != repeat:
+                error = "The passwords do not match."
+            if error is not None:
+                return Response(
+                    content=_render_invite_accept_page(
+                        f"/invites/{token}",
+                        token_record.email,
+                        display_name=display_name,
+                        error=error,
+                        csrf_token=_csrf_token_from(request),
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            try:
+                user = store.create_user(
+                    email=token_record.email,
+                    password_hash=hash_password(password),
+                    display_name=display_name,
+                    role=token_record.role or UserRole.USER,
+                )
+            except ValueError:
+                return Response(
+                    content=_render_invalid_token_page(
+                        "This invite link is invalid or has expired. "
+                        "Ask an administrator for a new invitation."
+                    ),
+                    media_type="text/html",
+                    status_code=400,
+                )
+            store.mark_auth_token_used(token_record.id)
+            store.record_user_login(user.id)
+            return user
+
+        result = await to_thread.run_sync(_handle)
+        if isinstance(result, Response):
+            return result
+        request.set_session({SESSION_USER_KEY: result.id})
         return Redirect("/", status_code=303)
 
     @get("/", sync_to_thread=True)
@@ -1360,6 +1693,9 @@ def create_app(
             login_page,
             do_login,
             logout,
+            create_invite,
+            invite_form,
+            accept_invite,
             create_static_files_router(path="/static", directories=[STATIC_DIRECTORY]),
         ],
         middleware=[

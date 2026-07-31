@@ -272,3 +272,202 @@ def test_production_requires_a_configured_secret_key(
         _app(tmp_path, environment="production")
 
     assert _app(tmp_path, environment="development") is not None
+
+
+def _create_invite(
+    client: TestClient, *, email: str = "invitee@example.test", role: str = "user"
+):
+    """Submit the admin invite form for an already logged-in client."""
+
+    return client.post(
+        "/admin/invites",
+        data={"email": email, "role": role},
+        headers=_csrf_headers(client),
+        follow_redirects=False,
+    )
+
+
+def _invite_url_from_outbox() -> str:
+    """Extract the invite path from the most recent captured email."""
+
+    import re
+
+    from litestar_email.backends import InMemoryBackend
+
+    assert InMemoryBackend.outbox, "expected an invite email in the outbox"
+    match = re.search(r"/invites/[A-Za-z0-9_-]+", InMemoryBackend.outbox[-1].body)
+    assert match, InMemoryBackend.outbox[-1].body
+    return match.group(0)
+
+
+def test_admin_invite_shows_copyable_url_and_sends_email(tmp_path: Path) -> None:
+    """The invite URL exists only in this response, so it must be visible."""
+
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="admin")
+        response = _create_invite(client, email="invitee@example.test", role="editor")
+
+        assert response.status_code == 200
+        invite_path = _invite_url_from_outbox()
+        assert invite_path in response.text
+        assert "invitee@example.test" in response.text
+
+
+def test_invite_email_failure_still_yields_the_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken mail relay must never lose a freshly created invite."""
+
+    from litestar_email import EmailDeliveryError
+
+    from berlin_events_explorer import webapp
+
+    async def _fail(*args: object, **kwargs: object) -> None:
+        raise EmailDeliveryError("relay down")
+
+    monkeypatch.setattr(webapp, "send_invite_email", _fail)
+
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="admin")
+        response = _create_invite(client)
+
+        assert response.status_code == 200
+        assert "/invites/" in response.text
+        assert "could not be sent" in response.text
+
+
+def test_accepting_an_invite_creates_the_account_with_its_role(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as admin_client:
+        login_as(admin_client, role="admin")
+        _create_invite(admin_client, email="new-editor@example.test", role="editor")
+        invite_path = _invite_url_from_outbox()
+
+    with TestClient(app) as invitee:
+        form_page = invitee.get(invite_path)
+        assert form_page.status_code == 200
+        assert "new-editor@example.test" in form_page.text
+
+        response = invitee.post(
+            invite_path,
+            data={
+                "display_name": "New Editor",
+                "password": "a-long-enough-password",
+                "password_repeat": "a-long-enough-password",
+            },
+            headers=_csrf_headers(invitee),
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+
+        assert invitee.get("/approvals/venues/x").status_code == 404
+        assert invitee.get("/settings").status_code == 403
+
+
+def test_invite_links_are_single_use(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as admin_client:
+        login_as(admin_client, role="admin")
+        _create_invite(admin_client)
+        invite_path = _invite_url_from_outbox()
+
+    with TestClient(app) as invitee:
+        invitee.get(invite_path)
+        invitee.post(
+            invite_path,
+            data={
+                "display_name": "First User",
+                "password": "a-long-enough-password",
+                "password_repeat": "a-long-enough-password",
+            },
+            headers=_csrf_headers(invitee),
+            follow_redirects=False,
+        )
+
+    with TestClient(app) as second:
+        assert "invalid or has expired" in second.get(invite_path).text
+        second.get("/login")
+        retry = second.post(
+            invite_path,
+            data={
+                "display_name": "Second User",
+                "password": "a-long-enough-password",
+                "password_repeat": "a-long-enough-password",
+            },
+            headers=_csrf_headers(second),
+            follow_redirects=False,
+        )
+        assert retry.status_code == 400
+
+
+def test_expired_invites_are_rejected(tmp_path: Path) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from berlin_events_explorer import auth
+    from berlin_events_explorer.models import UserRole as Role
+
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        raw, hashed = auth.generate_token()
+        client.app.state.store.create_auth_token(
+            purpose="invite",
+            token_hash=hashed,
+            email="late@example.test",
+            role=Role.USER,
+            expires_at=datetime.now(UTC) - timedelta(minutes=1),
+        )
+
+        assert "invalid or has expired" in client.get(f"/invites/{raw}").text
+
+
+def test_invites_for_registered_addresses_are_rejected(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="admin")
+        seed_user(
+            client.app.state.store, email="taken@example.test", role=UserRole.USER
+        )
+
+        response = _create_invite(client, email="taken@example.test")
+
+        assert response.status_code == 400
+        assert "already has an account" in response.text
+        assert client.app.state.store.list_pending_invites() == []
+
+
+def test_invite_creation_requires_admin(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="editor")
+        assert _create_invite(client).status_code == 403
+
+
+def test_invite_acceptance_validates_the_password(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    with TestClient(app) as admin_client:
+        login_as(admin_client, role="admin")
+        _create_invite(admin_client)
+        invite_path = _invite_url_from_outbox()
+
+    with TestClient(app) as invitee:
+        invitee.get(invite_path)
+        for payload in (
+            {"display_name": "X", "password": "short", "password_repeat": "short"},
+            {
+                "display_name": "X",
+                "password": "a-long-enough-password",
+                "password_repeat": "a-different-password",
+            },
+            {
+                "display_name": "",
+                "password": "a-long-enough-password",
+                "password_repeat": "a-long-enough-password",
+            },
+        ):
+            response = invitee.post(
+                invite_path,
+                data=payload,
+                headers=_csrf_headers(invitee),
+                follow_redirects=False,
+            )
+            assert response.status_code == 400, payload
