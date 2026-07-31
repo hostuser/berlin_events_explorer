@@ -72,6 +72,7 @@ DATASTAR_SCRIPT = (
     "@v1.0.0-RC.7/bundles/datastar.js"
 )
 DEFAULT_PAGE_SIZE = 50
+DEFAULT_TABLE_SIZE = 20
 MAX_PAGE_SIZE = 200
 DEFAULT_SYNC_INTERVAL = timedelta(hours=1)
 logger = logging.getLogger(__name__)
@@ -354,19 +355,24 @@ def create_app(
         store.set_setting(
             "musicbrainz_metadata_fetch_limit", DEFAULT_MUSICBRAINZ_FETCH_LIMIT
         )
+    if store.get_setting("default_table_size") is None:
+        store.set_setting("default_table_size", DEFAULT_TABLE_SIZE)
 
     @get("/", sync_to_thread=True)
     def index(
         page: int = 1,
-        page_size: int = DEFAULT_PAGE_SIZE,
+        page_size: int = 0,
         tab: str = "recent",
         recent_days: int = 7,
+        search: str = "",
     ) -> Response:
         all_events = list(store.list_events())
         normalized_days = _normalize_recent_days(recent_days)
+        effective_page_size = page_size or _get_default_table_size(store)
         events = _events_for_tab(all_events, tab=tab, recent_days=normalized_days)
+        filtered_events = _filter_events(events, search)
         paged_events, current_page, normalized_page_size, total_pages = (
-            _paginate_events(events, page=page, page_size=page_size)
+            _paginate_events(filtered_events, page=page, page_size=effective_page_size)
         )
         venue_ids_by_event = store.get_venue_ids_for_events(
             [event.id for event in paged_events]
@@ -376,12 +382,13 @@ def create_app(
         )
         html = render_events_page(
             paged_events,
-            total_count=len(events),
+            total_count=len(filtered_events),
             page=current_page,
             page_size=normalized_page_size,
             total_pages=total_pages,
             tab=tab,
             recent_days=normalized_days,
+            search=search.strip(),
             venue_ids_by_event=venue_ids_by_event,
             artist_ids_by_event_performer=artist_ids_by_event_performer,
         )
@@ -418,7 +425,10 @@ def create_app(
         """Render the public venue catalog with event counts."""
 
         return Response(
-            content=_render_venues_page(store.list_venue_summaries()),
+            content=_render_venues_page(
+                store.list_venue_summaries(),
+                table_size=_get_default_table_size(store),
+            ),
             media_type="text/html",
         )
 
@@ -512,7 +522,9 @@ def create_app(
         candidates = store.list_venue_candidates(venue_id)
         selected = _select_candidate(candidates, candidate_key)
         return Response(
-            content=_render_venue_approval_form(venue, candidates, selected),
+            content=_render_venue_approval_form(
+                venue, candidates, selected, store.list_events_for_venue(venue_id)
+            ),
             media_type="text/html",
         )
 
@@ -553,7 +565,11 @@ def create_app(
             )
             return Response(
                 content=_render_venue_approval_form(
-                    venue, candidates, selected, error=str(exc)
+                    venue,
+                    candidates,
+                    selected,
+                    store.list_events_for_venue(venue_id),
+                    error=str(exc),
                 ),
                 media_type="text/html",
                 status_code=400,
@@ -583,6 +599,7 @@ def create_app(
                     venue,
                     store.list_venue_candidates(venue_id),
                     None,
+                    store.list_events_for_venue(venue_id),
                     error=str(exc),
                 ),
                 media_type="text/html",
@@ -690,17 +707,19 @@ def create_app(
     @post("/sync", status_code=200, sync_to_thread=True)
     def sync(
         page: int = 1,
-        page_size: int = DEFAULT_PAGE_SIZE,
+        page_size: int = 0,
         tab: str = "recent",
         recent_days: int = 7,
+        search: str = "",
     ) -> Stream:
         return Stream(
             content=_perform_sync_stream(
                 store,
                 page=page,
-                page_size=page_size,
+                page_size=page_size or _get_default_table_size(store),
                 tab=tab,
                 recent_days=recent_days,
+                search=search,
                 auto_approve_threshold=_get_auto_approve_threshold(
                     store, auto_approve_threshold
                 ),
@@ -724,6 +743,7 @@ def create_app(
                 musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
                     store
                 ),
+                default_table_size=_get_default_table_size(store),
                 environment=environment,
                 version=_get_app_version(),
                 saved=saved == "1",
@@ -743,6 +763,7 @@ def create_app(
         raw_metadata_fetch_limit = _form_string(
             form, "musicbrainz_metadata_fetch_limit"
         )
+        raw_table_size = _form_string(form, "default_table_size")
         try:
             threshold = float(raw_threshold)
             interval = (
@@ -760,6 +781,11 @@ def create_app(
                 if raw_metadata_fetch_limit
                 else _get_musicbrainz_metadata_fetch_limit(store)
             )
+            table_size = (
+                int(raw_table_size)
+                if raw_table_size
+                else _get_default_table_size(store)
+            )
             if not math.isfinite(threshold) or not 0 <= threshold <= 1:
                 raise ValueError
             if not math.isfinite(interval) or not 1.0 <= interval <= 300:
@@ -767,6 +793,8 @@ def create_app(
             if not 1 <= fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
                 raise ValueError
             if not 1 <= metadata_fetch_limit <= MAX_MUSICBRAINZ_FETCH_LIMIT:
+                raise ValueError
+            if not 1 <= table_size <= MAX_PAGE_SIZE:
                 raise ValueError
         except ValueError:
             return Response(
@@ -781,8 +809,9 @@ def create_app(
                     musicbrainz_metadata_fetch_limit=_get_musicbrainz_metadata_fetch_limit(
                         store
                     ),
+                    default_table_size=_get_default_table_size(store),
                     environment=environment,
-                    error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000.",
+                    error="Confidence threshold must be a number between 0 and 1; MusicBrainz pacing must be 1–300 seconds; fetch count must be 1–10000; table size must be 1–200.",
                 ),
                 media_type="text/html",
                 status_code=400,
@@ -791,6 +820,7 @@ def create_app(
         store.set_setting("musicbrainz_request_interval_seconds", interval)
         store.set_setting("musicbrainz_fetch_limit", fetch_limit)
         store.set_setting("musicbrainz_metadata_fetch_limit", metadata_fetch_limit)
+        store.set_setting("default_table_size", table_size)
         return Redirect("/settings?saved=1", status_code=303)
 
     @post("/settings/clear-database", sync_to_thread=True)
@@ -907,12 +937,26 @@ def _get_musicbrainz_metadata_fetch_limit(store: EventStore) -> int:
     return DEFAULT_MUSICBRAINZ_FETCH_LIMIT
 
 
+def _get_default_table_size(store: EventStore) -> int:
+    """Return persisted default table row count, falling back to the default."""
+
+    configured = store.get_setting("default_table_size")
+    if (
+        isinstance(configured, int)
+        and not isinstance(configured, bool)
+        and 1 <= configured <= MAX_PAGE_SIZE
+    ):
+        return configured
+    return DEFAULT_TABLE_SIZE
+
+
 def _render_settings_page(
     *,
     threshold: float,
     musicbrainz_request_interval: float = DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
     musicbrainz_fetch_limit: int = DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
     musicbrainz_metadata_fetch_limit: int = DEFAULT_MUSICBRAINZ_FETCH_LIMIT,
+    default_table_size: int = DEFAULT_TABLE_SIZE,
     environment: str,
     version: str | None = None,
     saved: bool = False,
@@ -1014,6 +1058,10 @@ def _render_settings_page(
             <input id="musicbrainz-metadata-fetch-limit" name="musicbrainz_metadata_fetch_limit" type="number"
               min="1" max="10000" step="1" required value="{musicbrainz_metadata_fetch_limit}" />
             <small class="hint">Limit the number of verified artists checked for missing metadata in one background worker run.</small>
+            <label for="default-table-size">Default table size (rows)</label>
+            <input id="default-table-size" name="default_table_size" type="number"
+              min="1" max="{MAX_PAGE_SIZE}" step="1" required value="{default_table_size}" />
+            <small class="hint">How many rows are shown by default in recently added, upcoming, and venue tables.</small>
             <br /><button type="submit">Save settings</button>
           </form>
         </section>
@@ -1071,6 +1119,17 @@ def _approval_styles() -> str:
       .button { display:inline-block; text-decoration:none; }
       button.secondary,.button.secondary { background:#e2e8f0; color:#0f172a; }
       .error { color:var(--danger); background:#fee2e2; border-radius:.55rem; padding:.7rem; }
+      .events-section { margin-top:1.5rem; }
+      .events-card { max-height:23rem; overflow:auto; padding:0 1rem 1rem; }
+      .events-card .event-table { display:table; }
+      .events-card .event-table thead { display:table-header-group; position:sticky; top:0;
+        z-index:1; background:var(--surface); }
+      .events-card .event-table tbody { display:table-row-group; }
+      .events-card .event-table tr { display:table-row; }
+      .events-card .event-table th,
+      .events-card .event-table td { display:table-cell; }
+      .events-card .event-table tbody tr td::before { content:none; display:none; }
+      {_event_table_styles()}
       @media (max-width:720px) { .form-grid { grid-template-columns:1fr; }
         .field-wide { grid-column:auto; } main { padding:1rem .75rem 2rem; }
         table,thead,tbody,tr,th,td { display:block; } thead { display:none; }
@@ -1167,6 +1226,7 @@ def _render_venue_approval_form(
     venue: VenueRecord,
     candidates: list[VenueCandidate],
     selected: VenueCandidate | None,
+    events: list[Event],
     *,
     error: str | None = None,
 ) -> str:
@@ -1183,6 +1243,13 @@ def _render_venue_approval_form(
     )
     if not suggestions:
         suggestions = '<p class="muted">No suggestions have been discovered yet.</p>'
+
+    upcoming_events = _upcoming_events(events)
+    event_table = _render_event_table(
+        upcoming_events,
+        show_venue=False,
+        empty_text="No upcoming events are associated with this venue.",
+    )
 
     base_address = selected.address if selected else venue.address
     base_postal_code = selected.postal_code if selected else venue.postal_code
@@ -1214,7 +1281,11 @@ def _render_venue_approval_form(
 <style>{_approval_styles()}</style></head><body><main>
 <p><a href="{back_href}">← {back_label}</a></p><p class="kicker">Venue approval</p>
 <h1>{escape(venue.name)}</h1><p class="muted">Choose a suggestion or enter the venue details manually, then review and approve the form.</p>
-{error_html}<h2>Suggestions</h2><div class="suggestions">{suggestions}</div>
+{error_html}<section class="events-section" aria-labelledby="venue-events-heading">
+<h2 id="venue-events-heading">Upcoming events ({len(upcoming_events)})</h2>
+<div class="card events-card">{event_table}</div>
+</section>
+<h2>Suggestions</h2><div class="suggestions">{suggestions}</div>
 <form method="post" action="/approvals/venues/{escape(venue.id)}" class="card">
 {hidden}<div class="form-grid">
 {_venue_field("name", "Venue name", venue.name, wide=True)}
@@ -1382,6 +1453,7 @@ def render_events_page(
     total_pages: int,
     tab: str = "upcoming",
     recent_days: int = 7,
+    search: str = "",
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
 ) -> str:
@@ -1598,6 +1670,77 @@ def render_events_page(
         font-size: 0.9rem;
       }
 
+      .filter-bar {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin: 0 0 0.8rem;
+      }
+
+      .filter-label {
+        display: grid;
+        gap: 0.35rem;
+        color: #334155;
+        font-size: 0.85rem;
+        font-weight: 700;
+        width: min(28rem, 100%);
+      }
+
+      .filter-input {
+        width: 100%;
+        padding: 0.72rem 0.8rem;
+        border: 1px solid #b9c2d0;
+        border-radius: 0.65rem;
+        color: var(--text);
+        background: var(--surface);
+        font: inherit;
+      }
+
+      .filter-input:focus {
+        outline: 3px solid #bfdbfe;
+        outline-offset: 2px;
+      }
+
+      .filter-wrapper {
+        position: relative;
+      }
+
+      .filter-clear {
+        position: absolute;
+        right: 0.5rem;
+        top: 50%;
+        transform: translateY(-50%);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        width: 1.4rem;
+        height: 1.4rem;
+        border: 0;
+        border-radius: 50%;
+        background: #e2e8f0;
+        color: #475569;
+        font-size: 0.95rem;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0;
+      }
+
+      .filter-clear:hover {
+        background: #cbd5e1;
+      }
+
+      .filter-clear.visible {
+        display: flex;
+      }
+
+      .result-count {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin: 0 0 0.2rem;
+      }
+
 """
         + _event_table_styles()
         + """
@@ -1622,6 +1765,7 @@ def render_events_page(
         total_pages=total_pages,
         tab=tab,
         recent_days=recent_days,
+        search=search,
         venue_ids_by_event=venue_ids_by_event,
         artist_ids_by_event_performer=artist_ids_by_event_performer,
     )
@@ -1649,7 +1793,7 @@ def render_events_page(
               class="sync-button"
               data-attr="{{'disabled': $isSyncing}}"
               data-text="$isSyncing ? 'Syncing...' : 'Sync now'"
-              data-on:click="@post('sync?tab={tab}&recent_days={recent_days}')">
+              data-on:click="@post('sync?tab={tab}&recent_days={recent_days}&search={escape(search, quote=True)}')">
               Sync now
             </button>
             <a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>
@@ -1658,9 +1802,46 @@ def render_events_page(
       </header>
       <p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>
       <section id="sync-progress" class="sync-progress" aria-live="polite"></section>
-      {_render_tabs(tab=tab, recent_days=recent_days)}
+      {_render_tabs(tab=tab, recent_days=recent_days, search=search)}
+      <section class="filter-bar" aria-labelledby="event-filter-label">
+        <form class="filter-label" id="event-filter-label" method="get" action="/">
+          <label for="event-filter">Filter events</label>
+          <div class="filter-wrapper">
+            <input class="filter-input" id="event-filter" type="search" name="search"
+              value="{escape(search, quote=True)}"
+              placeholder="Search by title, venue, or performers" autocomplete="off" />
+            <button class="filter-clear" id="event-filter-clear" type="button"
+              aria-label="Clear filter">&times;</button>
+          </div>
+          <input type="hidden" name="tab" value="{escape(tab, quote=True)}" />
+          <input type="hidden" name="recent_days" value="{recent_days}" />
+        </form>
+        <p class="result-count" id="event-result-count" aria-live="polite">{total_count} events</p>
+      </section>
       {events_html}
     </main>
+    <script>
+      (() => {{
+        const input = document.querySelector("#event-filter");
+        const clear = document.querySelector("#event-filter-clear");
+        const form = input ? input.closest("form") : null;
+        if (!input || !clear || !form) return;
+        const updateClear = () => {{
+          clear.classList.toggle("visible", input.value.length > 0);
+        }};
+        clear.addEventListener("click", () => {{
+          input.value = "";
+          form.requestSubmit();
+        }});
+        let timer;
+        input.addEventListener("input", () => {{
+          updateClear();
+          clearTimeout(timer);
+          timer = setTimeout(() => form.requestSubmit(), 350);
+        }});
+        updateClear();
+      }})();
+    </script>
   </body>
 </html>
 """
@@ -1726,11 +1907,15 @@ def _render_date_events_page(
 </html>"""
 
 
-def _render_venues_page(summaries: list[VenueSummary]) -> str:
+def _render_venues_page(
+    summaries: list[VenueSummary], *, table_size: int = DEFAULT_TABLE_SIZE
+) -> str:
     """Render the venue catalog and its client-side name filter."""
 
+    total_venues = len(summaries)
+    displayed_summaries = summaries[: max(1, table_size)]
     rows: list[str] = []
-    for summary in summaries:
+    for summary in displayed_summaries:
         venue = summary.venue
         district = venue.district or "Not listed"
         search_text = f"{venue.name} {district}".casefold()
@@ -1751,6 +1936,12 @@ def _render_venues_page(summaries: list[VenueSummary]) -> str:
         '<p class="empty-state">No venues have been synced yet.</p>'
         if not summaries
         else ""
+    )
+    hidden_count = total_venues - len(displayed_summaries)
+    shown_text = (
+        f"Showing {len(displayed_summaries)} of {total_venues} venues"
+        if hidden_count > 0
+        else f"{total_venues} venues"
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -1822,7 +2013,7 @@ def _render_venues_page(summaries: list[VenueSummary]) -> str:
           <input class="filter-input" id="venue-filter" type="search"
             placeholder="Search by venue or district" autocomplete="off" />
         </label>
-        <p class="result-count" id="venue-result-count" aria-live="polite">{len(summaries)} venues</p>
+        <p class="result-count" id="venue-result-count" aria-live="polite">{shown_text}</p>
       </section>
       <section class="catalog" aria-label="Venue list">
         {empty_table}
@@ -2017,13 +2208,17 @@ def _perform_sync_stream(
     page_size: int = DEFAULT_PAGE_SIZE,
     tab: str = "upcoming",
     recent_days: int = 7,
+    search: str = "",
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
 ):
     """Run sync and emit Datastar SSE patch events."""
 
     normalized_days = _normalize_recent_days(recent_days)
-    current_events = _events_for_tab(
-        list(store.list_events()), tab=tab, recent_days=normalized_days
+    current_events = _filter_events(
+        _events_for_tab(
+            list(store.list_events()), tab=tab, recent_days=normalized_days
+        ),
+        search,
     )
     yield _sse_event(
         "datastar-patch-signals",
@@ -2080,8 +2275,11 @@ def _perform_sync_stream(
     else:
         sync_error = None
 
-    synced_events = _events_for_tab(
-        list(store.list_events()), tab=tab, recent_days=normalized_days
+    synced_events = _filter_events(
+        _events_for_tab(
+            list(store.list_events()), tab=tab, recent_days=normalized_days
+        ),
+        search,
     )
     paged_events, current_page, normalized_page_size, total_pages = _paginate_events(
         synced_events,
@@ -2096,6 +2294,7 @@ def _perform_sync_stream(
         total_pages=total_pages,
         tab=tab,
         recent_days=normalized_days,
+        search=search.strip(),
         venue_ids_by_event=store.get_venue_ids_for_events(
             [event.id for event in paged_events]
         ),
@@ -2344,6 +2543,7 @@ def _render_events_panel(
     total_pages: int,
     tab: str = "upcoming",
     recent_days: int = 7,
+    search: str = "",
     venue_ids_by_event: dict[str, str] | None = None,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
 ) -> str:
@@ -2360,7 +2560,8 @@ def _render_events_panel(
     end_index = min((page - 1) * page_size + len(events), total_count)
     has_prev = page > 1
     has_next = page < total_pages
-    query_suffix = f"&tab={tab}&recent_days={recent_days}"
+    search_param = f"&search={escape(search, quote=True)}" if search else ""
+    query_suffix = f"&tab={tab}&recent_days={recent_days}{search_param}"
     prev_url = (
         f"?page={page - 1}&page_size={page_size}{query_suffix}" if has_prev else "#"
     )
@@ -2458,12 +2659,13 @@ def _events_on_date(events: list[Event], *, target_date: date) -> list[Event]:
     )
 
 
-def _render_tabs(*, tab: str, recent_days: int) -> str:
+def _render_tabs(*, tab: str, recent_days: int, search: str = "") -> str:
     """Render navigation and the recent-events timeframe control."""
 
     active_tab = tab if tab in {"recent", "upcoming"} else "upcoming"
     recent_active = "active" if active_tab == "recent" else ""
     upcoming_active = "active" if active_tab == "upcoming" else ""
+    search_param = f"&search={escape(search, quote=True)}" if search else ""
     options = "".join(
         f'<option value="{days}"{" selected" if days == recent_days else ""}>'
         f"Last {days} days</option>"
@@ -2480,13 +2682,32 @@ def _render_tabs(*, tab: str, recent_days: int) -> str:
     )
     return (
         '<nav class="tabs" aria-label="Event views">'
-        f'<a class="tab {recent_active}" href="?tab=recent&recent_days={recent_days}">Recently added</a>'
-        f'<a class="tab {upcoming_active}" href="?tab=upcoming&recent_days={recent_days}">Upcoming</a>'
+        f'<a class="tab {recent_active}" href="?tab=recent&recent_days={recent_days}{search_param}">Recently added</a>'
+        f'<a class="tab {upcoming_active}" href="?tab=upcoming&recent_days={recent_days}{search_param}">Upcoming</a>'
         '<a class="tab" href="/venues">Venues</a>'
         '<a class="tab" href="/approvals">Awaiting approval</a>'
         "</nav>"
         f"{settings}"
     )
+
+
+def _event_search_text(event: Event) -> str:
+    """Build a case-folded haystack from title, venue, and performers."""
+
+    parts = [event.title]
+    if event.venue is not None:
+        parts.append(event.venue.name)
+    parts.extend(performer.name for performer in event.performers)
+    return " ".join(parts).casefold()
+
+
+def _filter_events(events: list[Event], search: str) -> list[Event]:
+    """Return events whose title, venue, or performers match the search term."""
+
+    query = search.strip().casefold()
+    if not query:
+        return events
+    return [event for event in events if query in _event_search_text(event)]
 
 
 def _render_event_row(
@@ -2531,9 +2752,10 @@ def _render_event_row(
         f'<td data-label="Date added">{date_added}</td>' if show_date_added else ""
     )
     venue_cell = f'<td data-label="Venue">{venue}</td>' if show_venue else ""
+    search_attr = escape(_event_search_text(event), quote=True)
 
     return (
-        "<tr>"
+        f'<tr data-event-row data-event-search="{search_attr}">'
         f"{start_date_cell}"
         f"{date_added_cell}"
         f'<td data-label="Title">{title}</td>'

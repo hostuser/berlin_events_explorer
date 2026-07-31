@@ -19,10 +19,11 @@ from berlin_events_explorer.models import (
     VenueRecord,
     VenueStatus,
 )
-from berlin_events_explorer.storage import EventStore
+from berlin_events_explorer.storage import EventStore, VenueSummary
 from berlin_events_explorer.webapp import (
     _get_app_version,
     _events_on_date,
+    _get_default_table_size,
     _paginate_events,
     _recent_events,
     _periodic_sync,
@@ -117,7 +118,7 @@ def test_render_events_page_renders_table_rows() -> None:
     assert 'href="/artists/dj-example"' in page
     assert "techno, house" in page
     assert "Berlin Events Explorer (" in page
-    assert "data-on:click=\"@post('sync?tab=upcoming&recent_days=7')\"" in page
+    assert "data-on:click=\"@post('sync?tab=upcoming&recent_days=7&search=')\"" in page
     assert "data-signals" in page
     assert "Page 1 of 2" in page
     assert "?page=2&page_size=25" in page
@@ -360,7 +361,10 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
         response = client.get("/")
 
     assert response.status_code == 200
-    assert "data-on:click=\"@post('sync?tab=recent&recent_days=7')\"" in response.text
+    assert (
+        "data-on:click=\"@post('sync?tab=recent&recent_days=7&search=')\""
+        in response.text
+    )
     assert "Sync now" in response.text
     assert 'href="/approvals"' in response.text
     assert "Awaiting approval" in response.text
@@ -420,11 +424,35 @@ def test_venue_approval_form_offers_suggestion_and_editable_fields(tmp_path) -> 
     database = tmp_path / "events.sqlite"
     store = EventStore(database)
     _seed_pending_venue(store)
+    upcoming_event = _seed_event().model_copy(
+        update={"id": "upcoming-at-example", "title": "Future Signal"}
+    )
+    past_event = _seed_event().model_copy(
+        update={
+            "id": "past-at-example",
+            "title": "Past Signal",
+            "start_date": date.today() - timedelta(days=1),
+        }
+    )
+    store.upsert(upcoming_event)
+    store.upsert(past_event)
+    store.link_event_venue(
+        upcoming_event.id, "example-club", source_name="Example Club"
+    )
+    store.link_event_venue(past_event.id, "example-club", source_name="Example Club")
 
     with TestClient(create_app(database)) as client:
         response = client.get("/approvals/venues/example-club")
 
     assert response.status_code == 200
+    assert 'href="/approvals">← Back to approval queue' in response.text
+    assert "Upcoming events (1)" in response.text
+    assert "Future Signal" in response.text
+    assert "Past Signal" not in response.text
+    assert "max-height:23rem" in response.text
+    assert "overflow:auto" in response.text
+    assert "padding:0 1rem 1rem" in response.text
+    assert "position:sticky" in response.text
     assert "Suggested Street 1, 10115 Berlin" in response.text
     assert 'name="address" value="Suggested Street 1, 10115 Berlin"' in response.text
     assert 'name="website" value="https://suggested.example/"' in response.text
@@ -697,7 +725,11 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
 
     edited_venue = store.get_venue("example-club")
     assert edit_response.status_code == 200
+    assert 'href="/venues/example-club">← Back to venue' in edit_response.text
+    assert "Back to approval queue" not in edit_response.text
     assert 'name="address" value="Example Street 1, 10115 Berlin"' in edit_response.text
+    assert "Upcoming events (1)" in edit_response.text
+    assert "House of Signals" in edit_response.text
     assert save_response.status_code == 303
     assert save_response.headers["location"] == "/venues/example-club"
     assert edited_venue is not None
@@ -1251,3 +1283,183 @@ def test_sse_event_removes_payload_newlines() -> None:
     assert lines[0] == "event: datastar-patch-elements"
     assert lines[1].startswith('data: elements <section id="events-panel">')
     assert lines[2] == ""
+
+
+def _seed_venue_summaries(total: int) -> list[VenueSummary]:
+    """Return deterministic venue summaries for table-size tests."""
+
+    summaries: list[VenueSummary] = []
+    for index in range(total):
+        venue = VenueRecord(
+            id=f"venue-{index}",
+            name=f"Venue {index:02d}",
+            normalized_name=f"venue {index:02d}",
+            district="Mitte",
+            status=VenueStatus.VERIFIED,
+        )
+        summaries.append(VenueSummary(venue=venue, event_count=index + 1))
+    return summaries
+
+
+def test_render_venues_page_limits_rows_to_table_size() -> None:
+    """The venues table should only render rows up to the configured table size."""
+
+    summaries = _seed_venue_summaries(50)
+    html = _render_venues_page(summaries, table_size=10)
+
+    assert "Venue 09" in html
+    assert "Venue 10" not in html
+    assert "Showing 10 of 50 venues" in html
+
+
+def test_render_venues_page_shows_all_when_under_limit() -> None:
+    """No truncation text should appear when venues fit within the table size."""
+
+    summaries = _seed_venue_summaries(5)
+    html = _render_venues_page(summaries, table_size=20)
+
+    assert "Venue 04" in html
+    assert "5 venues" in html
+    assert "Showing" not in html
+
+
+def test_index_route_uses_default_table_size_setting(tmp_path) -> None:
+    """The index route should paginate with the configured default_table_size."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(50):
+        store.upsert(
+            _seed_event().model_copy(
+                update={
+                    "id": f"evt-{index}",
+                    "title": f"Event {index:02d}",
+                    "start_date": date.today() + timedelta(days=index + 1),
+                }
+            )
+        )
+    store.set_setting("default_table_size", 5)
+    app = create_app(database, sync_interval=None, environment="development")
+    client = TestClient(app)
+
+    response = client.get("/?tab=upcoming")
+
+    assert response.status_code == 200
+    assert "Event 04" in response.text
+    assert "Event 05" not in response.text
+
+
+def test_index_route_page_size_param_overrides_setting(tmp_path) -> None:
+    """An explicit page_size query param should override the stored setting."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(50):
+        store.upsert(
+            _seed_event().model_copy(
+                update={
+                    "id": f"evt-{index}",
+                    "title": f"Event {index:02d}",
+                    "start_date": date.today() + timedelta(days=index + 1),
+                }
+            )
+        )
+    store.set_setting("default_table_size", 5)
+    app = create_app(database, sync_interval=None, environment="development")
+    client = TestClient(app)
+
+    response = client.get("/?tab=upcoming&page_size=10")
+
+    assert response.status_code == 200
+    assert "Event 09" in response.text
+    assert "Event 10" not in response.text
+
+
+def test_venues_route_uses_default_table_size_setting(tmp_path) -> None:
+    """The venues route should limit rows to the configured default_table_size."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    for index in range(30):
+        store.upsert_venue(
+            VenueRecord(
+                id=f"venue-{index}",
+                name=f"Venue {index:02d}",
+                normalized_name=f"venue {index:02d}",
+                district="Mitte",
+                status=VenueStatus.VERIFIED,
+            )
+        )
+    store.set_setting("default_table_size", 3)
+    app = create_app(database, sync_interval=None, environment="development")
+    client = TestClient(app)
+
+    response = client.get("/venues")
+
+    assert response.status_code == 200
+    assert "Venue 02" in response.text
+    assert "Venue 03" not in response.text
+    assert "Showing 3 of 30 venues" in response.text
+
+
+def test_settings_page_includes_default_table_size(tmp_path) -> None:
+    """The settings form should include the default table size field with the current value."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    store.set_setting("default_table_size", 15)
+    app = create_app(database, sync_interval=None, environment="development")
+    client = TestClient(app)
+
+    response = client.get("/settings")
+
+    assert response.status_code == 200
+    assert "default_table_size" in response.text
+    assert 'value="15"' in response.text
+
+
+def test_save_settings_persists_default_table_size(tmp_path) -> None:
+    """Saving settings should persist the default table size value."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    app = create_app(database, sync_interval=None, environment="development")
+    client = TestClient(app)
+
+    response = client.post(
+        "/settings",
+        data={
+            "auto_approve_threshold": "0.9",
+            "musicbrainz_request_interval_seconds": "1.5",
+            "musicbrainz_fetch_limit": "10",
+            "musicbrainz_metadata_fetch_limit": "10",
+            "default_table_size": "25",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert store.get_setting("default_table_size") == 25
+
+
+def test_create_app_initializes_default_table_size(tmp_path) -> None:
+    """create_app should seed the default_table_size setting on first run."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    create_app(database, sync_interval=None, environment="development")
+
+    assert store.get_setting("default_table_size") == 20
+
+
+def test_get_default_table_size_falls_back_to_default(tmp_path) -> None:
+    """_get_default_table_size should return the default when unset or invalid."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    assert _get_default_table_size(store) == 20
+
+    store.set_setting("default_table_size", "invalid")  # type: ignore[arg-type]
+    assert _get_default_table_size(store) == 20
+
+    store.set_setting("default_table_size", 0)
+    assert _get_default_table_size(store) == 20
