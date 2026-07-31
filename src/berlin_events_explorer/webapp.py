@@ -24,6 +24,7 @@ from html import escape
 from pathlib import Path
 from typing import AsyncIterator
 import math
+from urllib.parse import urlparse
 
 import httpx
 from litestar import Litestar, Request, get, post
@@ -39,6 +40,7 @@ from berlin_events_explorer.artist_enrichment import (
 from berlin_events_explorer._version import version as PACKAGE_VERSION
 from berlin_events_explorer.models import (
     ArtistCandidate,
+    ArtistMetadata,
     ArtistRecord,
     ArtistStatus,
     Event,
@@ -61,6 +63,7 @@ from berlin_events_explorer.venue_ingestion import (
     sync_source_and_ingest_venues,
 )
 from berlin_events_explorer.venues import normalize_venue_name
+from berlin_events_explorer.artists import normalize_artist_name
 
 DATASTAR_SCRIPT = (
     "https://cdn.jsdelivr.net/gh/starfederation/datastar"
@@ -224,6 +227,72 @@ def _approve_edited_venue(
                 )
             )
     return approved
+
+
+def _save_edited_artist(
+    store: EventStore,
+    *,
+    artist_id: str,
+    form: Mapping[str, object],
+) -> ArtistRecord:
+    """Validate and persist manually edited artist fields."""
+
+    current = store.get_artist(artist_id)
+    if current is None:
+        raise ValueError(f"Unknown artist: {artist_id}")
+    name = _form_string(form, "name") if "name" in form else current.name
+    if not name:
+        raise ValueError("Artist name cannot be blank.")
+    existing_homepage = store.get_artist_official_homepage(artist_id)
+    homepage = (
+        (_form_string(form, "official_homepage") or None)
+        if "official_homepage" in form
+        else existing_homepage
+    )
+    if homepage is not None:
+        parsed = urlparse(homepage)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("Official homepage must be an HTTP(S) URL.")
+    genres_value = (
+        _form_string(form, "genres") if "genres" in form else ", ".join(current.genres)
+    )
+    genres = [genre.strip() for genre in genres_value.split(",") if genre.strip()]
+    values = current.model_dump(mode="python")
+    values.update(
+        {
+            "name": name,
+            "normalized_name": normalize_artist_name(name),
+            "artist_type": (
+                _form_string(form, "artist_type") or None
+                if "artist_type" in form
+                else current.artist_type
+            ),
+            "country": (
+                _form_string(form, "country") or None
+                if "country" in form
+                else current.country
+            ),
+            "disambiguation": (
+                _form_string(form, "disambiguation") or None
+                if "disambiguation" in form
+                else current.disambiguation
+            ),
+            "genres": genres,
+            "status": ArtistStatus.VERIFIED,
+        }
+    )
+    updated = store.upsert_artist(ArtistRecord.model_validate(values))
+    store.save_artist_metadata(
+        ArtistMetadata(
+            artist_id=artist_id,
+            field="official_homepage",
+            value=homepage or "",
+            provider="manual-review",
+            confidence=1.0,
+            retrieved_at=datetime.now(UTC),
+        )
+    )
+    return updated
 
 
 async def _periodic_sync(
@@ -442,6 +511,7 @@ def create_app(
         """Approve the venue using the values currently submitted by its form."""
 
         form = await request.form()
+        current = store.get_venue(venue_id)
         action = _form_string(form, "action")
         provider = _form_string(form, "provider")
         osm_type = _form_string(form, "osm_type")
@@ -476,7 +546,12 @@ def create_app(
                 media_type="text/html",
                 status_code=400,
             )
-        return Redirect("/approvals", status_code=303)
+        destination = (
+            f"/venues/{venue_id}"
+            if current is not None and current.status is VenueStatus.VERIFIED
+            else "/approvals"
+        )
+        return Redirect(destination, status_code=303)
 
     @post("/approvals/venues/{venue_id:str}/discover", sync_to_thread=True)
     def discover_venue(venue_id: FromPath[str]) -> Redirect | Response:
@@ -502,7 +577,7 @@ def create_app(
                 status_code=502,
             )
         store.record_venue_candidates(candidates)
-        if candidates:
+        if candidates and venue.status is not VenueStatus.VERIFIED:
             store.upsert_venue(
                 venue.model_copy(update={"status": VenueStatus.CANDIDATE})
             )
@@ -519,7 +594,9 @@ def create_app(
             )
         return Response(
             content=_render_artist_approval_form(
-                artist, store.list_artist_candidates(artist_id)
+                artist,
+                store.list_artist_candidates(artist_id),
+                homepage=store.get_artist_official_homepage(artist_id),
             ),
             media_type="text/html",
         )
@@ -528,15 +605,18 @@ def create_app(
     async def approve_artist(
         artist_id: FromPath[str], request: Request
     ) -> Redirect | Response:
-        """Select an explicitly reviewed MusicBrainz identity."""
+        """Apply reviewed identity data and manually edited artist fields."""
 
         form = await request.form()
         candidate_id = _form_string(form, "candidate")
+        current = store.get_artist(artist_id)
         try:
-            if not candidate_id:
+            if candidate_id:
+                store.select_artist_candidate(artist_id, "musicbrainz", candidate_id)
+            elif current is None or current.status is not ArtistStatus.VERIFIED:
                 raise ValueError("Select an artist candidate before approving.")
-            store.select_artist_candidate(artist_id, "musicbrainz", candidate_id)
-        except ValueError as exc:
+            _save_edited_artist(store, artist_id=artist_id, form=form)
+        except (ValueError, ValidationError) as exc:
             artist = store.get_artist(artist_id)
             if artist is None:
                 return Response(
@@ -544,12 +624,20 @@ def create_app(
                 )
             return Response(
                 content=_render_artist_approval_form(
-                    artist, store.list_artist_candidates(artist_id), error=str(exc)
+                    artist,
+                    store.list_artist_candidates(artist_id),
+                    homepage=store.get_artist_official_homepage(artist_id),
+                    error=str(exc),
                 ),
                 media_type="text/html",
                 status_code=400,
             )
-        return Redirect("/approvals?entity_type=artists", status_code=303)
+        destination = (
+            f"/artists/{artist_id}"
+            if current is not None and current.status is ArtistStatus.VERIFIED
+            else "/approvals?entity_type=artists"
+        )
+        return Redirect(destination, status_code=303)
 
     @post("/approvals/artists/{artist_id:str}/discover", sync_to_thread=True)
     def discover_artist(artist_id: FromPath[str]) -> Redirect | Response:
@@ -572,13 +660,16 @@ def create_app(
         except Exception as exc:
             return Response(
                 content=_render_artist_approval_form(
-                    artist, store.list_artist_candidates(artist_id), error=str(exc)
+                    artist,
+                    store.list_artist_candidates(artist_id),
+                    homepage=store.get_artist_official_homepage(artist_id),
+                    error=str(exc),
                 ),
                 media_type="text/html",
                 status_code=502,
             )
         store.record_artist_candidates(candidates)
-        if candidates:
+        if candidates and artist.status is not ArtistStatus.VERIFIED:
             store.upsert_artist(
                 artist.model_copy(update={"status": ArtistStatus.CANDIDATE})
             )
@@ -896,9 +987,10 @@ def _approval_styles() -> str:
         border-radius:.55rem; color:var(--text); background:#fff; }
       input:focus,a:focus,button:focus { outline:3px solid #bfdbfe; outline-offset:2px; }
       .actions { display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1rem; }
-      button { border:0; border-radius:.6rem; padding:.65rem .95rem; font-weight:700;
+      button,.button { border:0; border-radius:.6rem; padding:.65rem .95rem; font-weight:700;
         cursor:pointer; background:var(--primary); color:#fff; }
-      button.secondary { background:#e2e8f0; color:#0f172a; }
+      .button { display:inline-block; text-decoration:none; }
+      button.secondary,.button.secondary { background:#e2e8f0; color:#0f172a; }
       .error { color:var(--danger); background:#fee2e2; border-radius:.55rem; padding:.7rem; }
       @media (max-width:720px) { .form-grid { grid-template-columns:1fr; }
         .field-wide { grid-column:auto; } main { padding:1rem .75rem 2rem; }
@@ -1026,12 +1118,22 @@ def _render_venue_approval_form(
     )
 
     error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    back_href = (
+        f"/venues/{escape(venue.id, quote=True)}"
+        if venue.status is VenueStatus.VERIFIED
+        else "/approvals"
+    )
+    back_label = (
+        "Back to venue"
+        if venue.status is VenueStatus.VERIFIED
+        else "Back to approval queue"
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Approve {escape(venue.name)} · Berlin Events Explorer</title>
 <style>{_approval_styles()}</style></head><body><main>
-<p><a href="/approvals">← Back to approval queue</a></p><p class="kicker">Venue approval</p>
+<p><a href="{back_href}">← {back_label}</a></p><p class="kicker">Venue approval</p>
 <h1>{escape(venue.name)}</h1><p class="muted">Choose a suggestion or enter the venue details manually, then review and approve the form.</p>
 {error_html}<h2>Suggestions</h2><div class="suggestions">{suggestions}</div>
 <form method="post" action="/approvals/venues/{escape(venue.id)}" class="card">
@@ -1055,14 +1157,16 @@ def _render_artist_approval_form(
     artist: ArtistRecord,
     candidates: list[ArtistCandidate],
     *,
+    homepage: str | None = None,
     error: str | None = None,
 ) -> str:
-    """Render candidate identity evidence with an explicit approval action."""
+    """Render candidate identity evidence and editable artist fields."""
 
+    required = " required" if artist.status is not ArtistStatus.VERIFIED else ""
     options = (
         "".join(
             f'<label class="suggestion"><input type="radio" name="candidate" '
-            f'value="{escape(candidate.musicbrainz_id, quote=True)}" required> '
+            f'value="{escape(candidate.musicbrainz_id, quote=True)}"{required}> '
             f"<strong>{escape(candidate.display_name)}</strong> · "
             f"{escape(candidate.artist_type or 'Unknown type')} · "
             f"{escape(candidate.country or 'Unknown country')} · score {candidate.confidence:.2f}<br>"
@@ -1073,15 +1177,34 @@ def _render_artist_approval_form(
         or '<p class="muted">No candidates have been discovered yet.</p>'
     )
     error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    genres = ", ".join(artist.genres)
+    back_href = (
+        f"/artists/{escape(artist.id, quote=True)}"
+        if artist.status is ArtistStatus.VERIFIED
+        else "/approvals?entity_type=artists"
+    )
+    back_label = (
+        "Back to artist"
+        if artist.status is ArtistStatus.VERIFIED
+        else "Back to artist queue"
+    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Approve {escape(artist.name)} · Berlin Events Explorer</title><style>{_approval_styles()}</style></head>
-<body><main><p><a href="/approvals?entity_type=artists">← Back to artist queue</a></p>
-<p class="kicker">Artist approval</p><h1>{escape(artist.name)}</h1>
-<p class="muted">Select the verified MusicBrainz identity before it appears publicly.</p>{error_html}
-<form method="post" action="/approvals/artists/{escape(artist.id)}" class="card">
-<div class="suggestions">{options}</div><div class="actions"><button type="submit">Approve</button></div></form>
-<form method="post" action="/approvals/artists/{escape(artist.id)}/discover" class="actions">
+<title>Review {escape(artist.name)} · Berlin Events Explorer</title><style>{_approval_styles()}</style></head>
+<body><main><p><a href="{back_href}">← {back_label}</a></p>
+<p class="kicker">Artist review</p><h1>{escape(artist.name)}</h1>
+<p class="muted">Choose a suggestion if needed, edit the public fields, then approve the changes.</p>{error_html}
+<form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}" class="card">
+<h2>Suggestions</h2><div class="suggestions">{options}</div>
+<div class="form-grid">
+<label class="field-wide">Artist name<input type="text" name="name" required value="{escape(artist.name, quote=True)}" /></label>
+<label>Artist type<input type="text" name="artist_type" value="{escape(artist.artist_type or "", quote=True)}" /></label>
+<label>Country<input type="text" name="country" value="{escape(artist.country or "", quote=True)}" /></label>
+<label class="field-wide">Disambiguation<input type="text" name="disambiguation" value="{escape(artist.disambiguation or "", quote=True)}" /></label>
+<label class="field-wide">Genres<input type="text" name="genres" value="{escape(genres, quote=True)}" /></label>
+<label class="field-wide">Official homepage<input type="url" name="official_homepage" value="{escape(homepage or "", quote=True)}" /></label>
+</div><div class="actions"><button type="submit">Approve changes</button></div></form>
+<form method="post" action="/approvals/artists/{escape(artist.id, quote=True)}/discover" class="actions">
 <button type="submit" class="secondary">Find or refresh suggestions</button></form>
 </main></body></html>"""
 
@@ -1124,8 +1247,19 @@ def _render_artist_detail_page(
 body {{ margin:0; font-family:Inter,"Segoe UI",sans-serif; background:#f6f7fb; color:#0f172a; }}
 main {{ max-width:760px; margin:0 auto; padding:2rem 1.25rem 3rem; }} a {{ color:#1d4ed8; }}
 .card {{ background:#fff; border:1px solid #d5dbe8; border-radius:.85rem; padding:1.25rem; }}
+.detail-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }}
+.detail-header h1 {{ margin:.2rem 0 0; }}
+.detail-actions {{ display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1.25rem; }}
+.action-button {{ display:inline-flex; align-items:center; justify-content:center; min-height:2.4rem;
+  padding:.6rem .9rem; border:1px solid #1d4ed8; border-radius:.6rem; background:#1d4ed8;
+  color:#fff; font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }}
+.action-button.secondary {{ border-color:#cbd5e1; background:#e2e8f0; color:#0f172a; }}
+.action-button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
+@media (max-width:560px) {{ .detail-header {{ display:block; }} .detail-header .action-button {{ margin-top:.9rem; }} }}
 </style></head><body><main><p><a href="/">← Back to events</a></p><section class="card">
-<p>Berlin artist</p><h1>{escape(artist.name)}</h1><p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p><p>{identity}</p>
+<div class="detail-header"><div><p>Berlin artist</p><h1>{escape(artist.name)}</h1></div>
+<a class="action-button" href="/approvals/artists/{escape(artist.id, quote=True)}">Edit</a></div>
+<p>{details}</p><p><strong>Genres:</strong> {genres}</p><p>{homepage_link}</p><p>{identity}</p>
 </section><section><h2>Events</h2><ul>{event_items}</ul></section></main></body></html>"""
 
 
@@ -1143,7 +1277,8 @@ def render_events_page(
 ) -> str:
     """Render a full HTML page with the provided events."""
 
-    styles = """ :root {
+    styles = (
+        """ :root {
         --surface: #ffffff;
         --surface-soft: #f3f5f9;
         --text: #0f172a;
@@ -1353,35 +1488,9 @@ def render_events_page(
         font-size: 0.9rem;
       }
 
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.95rem;
-      }
-
-      thead th {
-        font-weight: 650;
-        color: #334155;
-        text-align: left;
-        border-bottom: 1px solid var(--line);
-        padding: 0.65rem 0.5rem;
-      }
-
-      th,
-      td {
-        text-align: left;
-        vertical-align: top;
-        padding: 0.6rem 0.5rem;
-        border-bottom: 1px solid var(--line);
-      }
-
-      tbody tr:hover td {
-        background: #f8fafc;
-      }
-
-      tbody tr:last-child td {
-        border-bottom: none;
-      }
+"""
+        + _event_table_styles()
+        + """
 
       @media (max-width: 720px) {
         .events-app {
@@ -1392,45 +1501,8 @@ def render_events_page(
           align-items: stretch;
         }
 
-        table,
-        thead,
-        tbody,
-        tr,
-        th,
-        td {
-          display: block;
-        }
-
-        thead {
-          display: none;
-        }
-
-        tbody tr {
-          margin-bottom: 0.7rem;
-          border: 1px solid var(--line);
-          border-radius: 0.7rem;
-          overflow: hidden;
-        }
-
-        tbody tr td {
-          padding: 0.45rem 0.65rem;
-          border-bottom: 1px solid var(--line);
-        }
-
-        tbody tr td::before {
-          content: attr(data-label);
-          display: block;
-          color: var(--muted);
-          font-size: 0.78rem;
-          margin-bottom: 0.2rem;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-        }
-
-        tbody tr td:last-child {
-          border-bottom: none;
-        }
       }"""
+    )
 
     events_html = _render_events_panel(
         events,
@@ -1495,28 +1567,15 @@ def _render_date_events_page(
 
     venue_ids_by_event = venue_ids_by_event or {}
     artist_ids_by_event_performer = artist_ids_by_event_performer or {}
-    rows = "".join(
-        _render_event_row(
-            event,
-            show_start_date=False,
-            venue_id=venue_ids_by_event.get(event.id),
-            artist_ids_by_billing_order={
-                billing_order: artist_id
-                for (
-                    event_id,
-                    billing_order,
-                ), artist_id in artist_ids_by_event_performer.items()
-                if event_id == event.id
-            },
-        )
-        for event in events
+    event_table = _render_event_table(
+        events,
+        show_start_date=False,
+        show_venue=True,
+        venue_ids_by_event=venue_ids_by_event,
+        artist_ids_by_event_performer=artist_ids_by_event_performer,
+        empty_text="No events are listed for this date.",
     )
     event_label = "event" if len(events) == 1 else "events"
-    empty_state = (
-        '<p class="empty-state">No events are listed for this date.</p>'
-        if not events
-        else ""
-    )
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -1539,22 +1598,8 @@ def _render_date_events_page(
       .card {{ background:var(--surface); border:1px solid var(--line); border-radius:.85rem;
         padding:.9rem; box-shadow:0 16px 40px rgba(15,23,42,.07); }}
       .empty-state {{ color:var(--muted); margin:.35rem 0; }}
-      table {{ width:100%; border-collapse:collapse; font-size:.95rem; }}
-      th,td {{ text-align:left; vertical-align:top; padding:.6rem .5rem; border-bottom:1px solid var(--line); }}
-      th {{ color:#334155; font-weight:650; }}
-      .date-link {{ white-space:nowrap; font-variant-numeric:tabular-nums; }}
-      tbody tr:hover td {{ background:#f8fafc; }}
-      tbody tr:last-child td {{ border-bottom:none; }}
-      @media (max-width:720px) {{
-        main {{ padding:1rem .75rem 2rem; }}
-        table,thead,tbody,tr,th,td {{ display:block; }}
-        thead {{ display:none; }}
-        tbody tr {{ margin-bottom:.7rem; border:1px solid var(--line); border-radius:.7rem; overflow:hidden; }}
-        tbody tr td {{ padding:.45rem .65rem; border-bottom:1px solid var(--line); }}
-        tbody tr td::before {{ content:attr(data-label); display:block; color:var(--muted);
-          font-size:.78rem; margin-bottom:.2rem; letter-spacing:.04em; text-transform:uppercase; }}
-        tbody tr td:last-child {{ border-bottom:none; }}
-      }}
+      {_event_table_styles()}
+      @media (max-width:720px) {{ main {{ padding:1rem .75rem 2rem; }} }}
     </style>
   </head>
   <body>
@@ -1564,11 +1609,7 @@ def _render_date_events_page(
       <h1>Events on {target_date.isoformat()}</h1>
       <p class="meta">{len(events)} {event_label} on this date.</p>
       <section class="card" aria-label="Events on {target_date.isoformat()}">
-        {empty_state}
-        <table>
-          <thead><tr><th>Title</th><th>Venue</th><th>Performers</th><th>Tags</th></tr></thead>
-          <tbody>{rows}</tbody>
-        </table>
+        {event_table}
       </section>
     </main>
   </body>
@@ -1764,13 +1805,10 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
           <p><a href="{escape(map_url, quote=True)}" target="_blank"
             rel="noopener noreferrer">View larger map</a></p>
         </section>"""
-    event_items = (
-        "".join(
-            f"<li>{escape(event.start_date.isoformat() if event.start_date else 'TBA')} — "
-            f"{escape(event.title)}</li>"
-            for event in events
-        )
-        or "<li>No associated events yet.</li>"
+    event_table = _render_event_table(
+        events,
+        show_venue=False,
+        empty_text="No associated events yet.",
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -1783,20 +1821,34 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
       main {{ max-width: 760px; margin: 0 auto; padding: 2rem 1.25rem 3rem; }}
       a {{ color: #1d4ed8; }}
       .card {{ background: #fff; border: 1px solid #d5dbe8; border-radius: .85rem; padding: 1.25rem; }}
+      .detail-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }}
+      .detail-header h1 {{ margin:.2rem 0 0; }}
+      .detail-actions {{ display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1.25rem; }}
+      .action-button {{ display:inline-flex; align-items:center; justify-content:center; min-height:2.4rem;
+        padding:.6rem .9rem; border:1px solid #1d4ed8; border-radius:.6rem; background:#1d4ed8;
+        color:#fff; font:inherit; font-weight:700; text-decoration:none; cursor:pointer; }}
+      .action-button.secondary {{ border-color:#cbd5e1; background:#e2e8f0; color:#0f172a; }}
+      .action-button:focus {{ outline:3px solid #bfdbfe; outline-offset:2px; }}
+      @media (max-width:560px) {{ .detail-header {{ display:block; }} .detail-header .action-button {{ margin-top:.9rem; }} }}
       .venue-map {{ margin-top: 1.5rem; }}
       .venue-map h2 {{ margin-bottom: .65rem; }}
       .venue-map iframe {{ display: block; width: 100%; min-height: 22rem; border: 1px solid #d5dbe8; border-radius: .85rem; }}
       .venue-map p {{ margin: .6rem 0 0; }}
       dt {{ color: #64748b; margin-top: 1rem; font-size: .85rem; text-transform: uppercase; }}
       dd {{ margin: .25rem 0 0; }}
+      .events-section {{ margin-top: 1.5rem; }}
+      .events-card {{ background: #fff; border: 1px solid #d5dbe8; border-radius: .85rem;
+        padding: .9rem; box-shadow: 0 16px 40px rgba(15,23,42,.07); }}
+      .empty-state {{ color: #64748b; margin: .35rem 0; }}
+      {_event_table_styles()}
     </style>
   </head>
   <body>
     <main>
       <p><a href="/venues">← Back to venues</a></p>
       <section class="card">
-        <p>Berlin venue</p>
-        <h1>{escape(venue.name)}</h1>
+        <div class="detail-header"><div><p>Berlin venue</p><h1>{escape(venue.name)}</h1></div>
+        <a class="action-button" href="/approvals/venues/{escape(venue.id, quote=True)}">Edit</a></div>
         {status_note}
         <dl>
           <dt>Address</dt><dd><address>{address}</address></dd>
@@ -1805,9 +1857,11 @@ def _render_venue_detail_page(venue: VenueRecord, events: list[Event]) -> str:
         </dl>
         {map_html}
       </section>
-      <section>
+      <section class="events-section">
         <h2>Events</h2>
-        <ul>{event_items}</ul>
+        <div class="events-card">
+          {event_table}
+        </div>
       </section>
     </main>
   </body>
@@ -2038,6 +2092,139 @@ def _sse_event(event_name: str, *lines: str) -> str:
     return "\n".join(chunks) + "\n"
 
 
+def _event_table_styles() -> str:
+    """Return shared responsive styles for rendered event tables."""
+
+    return """
+      .event-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.95rem;
+      }
+
+      .event-table thead th {
+        font-weight: 650;
+        color: #334155;
+        text-align: left;
+        border-bottom: 1px solid #d5dbe8;
+        padding: 0.65rem 0.5rem;
+      }
+
+      .event-table th,
+      .event-table td {
+        text-align: left;
+        vertical-align: top;
+        padding: 0.6rem 0.5rem;
+        border-bottom: 1px solid #d5dbe8;
+      }
+
+      .event-table tbody tr:hover td {
+        background: #f8fafc;
+      }
+
+      .event-table tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .event-table .date-link {
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+
+      @media (max-width: 720px) {
+        .event-table,
+        .event-table thead,
+        .event-table tbody,
+        .event-table tr,
+        .event-table th,
+        .event-table td {
+          display: block;
+        }
+
+        .event-table thead {
+          display: none;
+        }
+
+        .event-table tbody tr {
+          margin-bottom: 0.7rem;
+          border: 1px solid #d5dbe8;
+          border-radius: 0.7rem;
+          overflow: hidden;
+        }
+
+        .event-table tbody tr td {
+          padding: 0.45rem 0.65rem;
+          border-bottom: 1px solid #d5dbe8;
+        }
+
+        .event-table tbody tr td::before {
+          content: attr(data-label);
+          display: block;
+          color: #64748b;
+          font-size: 0.78rem;
+          margin-bottom: 0.2rem;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+        }
+
+        .event-table tbody tr td:last-child {
+          border-bottom: none;
+        }
+      }
+    """
+
+
+def _render_event_table(
+    events: list[Event],
+    *,
+    tab: str = "upcoming",
+    show_start_date: bool = True,
+    show_venue: bool = True,
+    empty_text: str = "No events have been synced yet.",
+    venue_ids_by_event: dict[str, str] | None = None,
+    artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+) -> str:
+    """Render a reusable event table with context-specific columns."""
+
+    venue_ids_by_event = venue_ids_by_event or {}
+    artist_ids_by_event_performer = artist_ids_by_event_performer or {}
+    rows = "".join(
+        _render_event_row(
+            event,
+            show_date_added=tab == "recent",
+            show_start_date=show_start_date,
+            show_venue=show_venue,
+            venue_id=venue_ids_by_event.get(event.id),
+            artist_ids_by_billing_order={
+                billing_order: artist_id
+                for (
+                    event_id,
+                    billing_order,
+                ), artist_id in artist_ids_by_event_performer.items()
+                if event_id == event.id
+            },
+        )
+        for event in events
+    )
+    headers = []
+    if show_start_date:
+        headers.append("<th>Start date</th>")
+    if tab == "recent":
+        headers.append("<th>Date added</th>")
+    headers.append("<th>Title</th>")
+    if show_venue:
+        headers.append("<th>Venue</th>")
+    headers.extend(("<th>Performers</th>", "<th>Tags</th>"))
+    empty_state = (
+        f'<p class="empty-state">{escape(empty_text)}</p>' if not events else ""
+    )
+    return f"""{empty_state}
+          <table class="event-table">
+            <thead><tr>{"".join(headers)}</tr></thead>
+            <tbody>{rows}</tbody>
+          </table>"""
+
+
 def _render_events_panel(
     events: list[Event],
     *,
@@ -2052,26 +2239,12 @@ def _render_events_panel(
 ) -> str:
     """Render the event table section used for live updates."""
 
-    venue_ids_by_event = venue_ids_by_event or {}
-    artist_ids_by_event_performer = artist_ids_by_event_performer or {}
-    rows = "".join(
-        _render_event_row(
-            event,
-            show_date_added=tab == "recent",
-            venue_id=venue_ids_by_event.get(event.id),
-            artist_ids_by_billing_order={
-                billing_order: artist_id
-                for (
-                    event_id,
-                    billing_order,
-                ), artist_id in artist_ids_by_event_performer.items()
-                if event_id == event.id
-            },
-        )
-        for event in events
+    event_table = _render_event_table(
+        events,
+        tab=tab,
+        venue_ids_by_event=venue_ids_by_event,
+        artist_ids_by_event_performer=artist_ids_by_event_performer,
     )
-    date_added_header = "<th>Date added</th>" if tab == "recent" else ""
-    empty_state = "<p>No events have been synced yet.</p>" if not events else ""
 
     start_index = (page - 1) * page_size + 1 if total_count else 0
     end_index = min((page - 1) * page_size + len(events), total_count)
@@ -2095,23 +2268,8 @@ def _render_events_panel(
     """
 
     return f"""<section id=\"events-panel\">
-      {empty_state}
+      {event_table}
       {pagination}
-      <table>
-        <thead>
-          <tr>
-            <th>Start date</th>
-            {date_added_header}
-            <th>Title</th>
-            <th>Venue</th>
-            <th>Performers</th>
-            <th>Tags</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows}
-        </tbody>
-      </table>
     </section>"""
 
 
@@ -2136,11 +2294,14 @@ def _recent_events(
     """Return events first observed within the requested number of days."""
 
     cutoff = (now or datetime.now(UTC)) - timedelta(days=_normalize_recent_days(days))
+    today = date.today()
     return sorted(
         (
             event
             for event in events
-            if event.first_seen_at is not None and event.first_seen_at >= cutoff
+            if event.first_seen_at is not None
+            and event.first_seen_at >= cutoff
+            and (event.start_date is None or event.start_date >= today)
         ),
         key=lambda event: event.first_seen_at or datetime.min.replace(tzinfo=UTC),
         reverse=True,
@@ -2223,6 +2384,7 @@ def _render_event_row(
     *,
     show_date_added: bool = False,
     show_start_date: bool = True,
+    show_venue: bool = True,
     venue_id: str | None = None,
     artist_ids_by_billing_order: dict[int, str] | None = None,
 ) -> str:
@@ -2258,13 +2420,14 @@ def _render_event_row(
     date_added_cell = (
         f'<td data-label="Date added">{date_added}</td>' if show_date_added else ""
     )
+    venue_cell = f'<td data-label="Venue">{venue}</td>' if show_venue else ""
 
     return (
         "<tr>"
         f"{start_date_cell}"
         f"{date_added_cell}"
         f'<td data-label="Title">{title}</td>'
-        f'<td data-label="Venue">{venue}</td>'
+        f"{venue_cell}"
         f'<td data-label="Performers">{performers or "TBA"}</td>'
         f'<td data-label="Tags">{tags or "—"}</td>'
         "</tr>"

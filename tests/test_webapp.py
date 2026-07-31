@@ -210,7 +210,7 @@ def test_render_events_panel_renders_empty_state() -> None:
     )
 
     assert "No events have been synced yet." in html
-    assert "<table>" in html
+    assert '<table class="event-table">' in html
 
 
 def test_recent_events_panel_includes_date_added_column() -> None:
@@ -299,10 +299,18 @@ def test_recent_events_uses_first_seen_at_and_configurable_window() -> None:
     old = _seed_event().model_copy(
         update={"id": "old", "first_seen_at": now - timedelta(days=10)}
     )
+    recent_past_event = _seed_event().model_copy(
+        update={
+            "id": "recent-past-event",
+            "first_seen_at": now - timedelta(days=2),
+            "start_date": date.today() - timedelta(days=1),
+        }
+    )
 
-    assert [event.id for event in _recent_events([old, recent], days=7, now=now)] == [
-        "recent"
-    ]
+    assert [
+        event.id
+        for event in _recent_events([old, recent, recent_past_event], days=7, now=now)
+    ] == ["recent"]
     assert [event.id for event in _recent_events([old, recent], days=14, now=now)] == [
         "recent",
         "old",
@@ -646,6 +654,7 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
     with TestClient(app) as client:
         index_response = client.get("/?tab=recent")
         detail_response = client.get("/venues/example-club")
+        suggestion_response = client.get("/approvals/venues/example-club")
 
     assert index_response.status_code == 200
     assert 'href="/venues/example-club"' in index_response.text
@@ -654,6 +663,46 @@ def test_venue_table_link_and_detail_page_render_verified_metadata(tmp_path) -> 
     assert 'href="https://example.club/"' in detail_response.text
     assert 'rel="noopener noreferrer"' in detail_response.text
     assert 'class="venue-map"' not in detail_response.text
+    assert (
+        "<th>Start date</th><th>Title</th><th>Performers</th><th>Tags</th>"
+        in detail_response.text
+    )
+    assert "<th>Venue</th>" not in detail_response.text
+    assert 'data-label="Venue"' not in detail_response.text
+    assert 'class="date-link" href="/dates/' in detail_response.text
+    assert "House of Signals" in detail_response.text
+    assert "<ul>" not in detail_response.text
+    assert 'href="/approvals/venues/example-club"' in detail_response.text
+    assert detail_response.text.count("Find suggestions") == 0
+    assert suggestion_response.status_code == 200
+    assert "Suggestions" in suggestion_response.text
+    assert "Find or refresh suggestions" in suggestion_response.text
+
+    with TestClient(app) as client:
+        edit_response = client.get("/approvals/venues/example-club")
+        save_response = client.post(
+            "/approvals/venues/example-club",
+            data={
+                "action": "approve",
+                "name": "Example Club Berlin",
+                "address": "Corrected Road 9, 10999 Berlin",
+                "postal_code": "10999",
+                "district": "Neukölln",
+                "city": "Berlin",
+                "country": "DE",
+                "website": "https://corrected.example/",
+            },
+            follow_redirects=False,
+        )
+
+    edited_venue = store.get_venue("example-club")
+    assert edit_response.status_code == 200
+    assert 'name="address" value="Example Street 1, 10115 Berlin"' in edit_response.text
+    assert save_response.status_code == 303
+    assert save_response.headers["location"] == "/venues/example-club"
+    assert edited_venue is not None
+    assert edited_venue.name == "Example Club Berlin"
+    assert edited_venue.district == "Neukölln"
 
 
 def test_venues_page_lists_districts_event_counts_and_case_insensitive_filter(
@@ -953,7 +1002,9 @@ def test_webapp_sync_endpoint_streams_venue_enrichment_progress(
     assert "Venue enrichment complete (2 of 2)" in response.text
 
 
-def test_artist_approval_queue_and_verified_public_artist_page(tmp_path) -> None:
+def test_artist_approval_queue_and_verified_public_artist_page(
+    tmp_path, monkeypatch
+) -> None:
     """Artists can be reviewed separately and only verified records get public pages."""
 
     database = tmp_path / "events.sqlite"
@@ -1001,6 +1052,7 @@ def test_artist_approval_queue_and_verified_public_artist_page(tmp_path) -> None
             follow_redirects=False,
         )
         public_after = client.get("/artists/die-arzte")
+        suggestion_response = client.get("/approvals/artists/die-arzte")
 
     assert queue.status_code == 200
     assert "Artists" in queue.text
@@ -1012,6 +1064,54 @@ def test_artist_approval_queue_and_verified_public_artist_page(tmp_path) -> None
     assert public_after.status_code == 200
     assert "Die Ärzte" in public_after.text
     assert "https://www.bademeister.com/" in public_after.text
+    assert 'href="/approvals/artists/die-arzte"' in public_after.text
+    assert public_after.text.count("Find suggestions") == 0
+    assert suggestion_response.status_code == 200
+    assert (
+        "Choose a suggestion if needed, edit the public fields"
+        in suggestion_response.text
+    )
+    assert "Find or refresh suggestions" in suggestion_response.text
+
+    with TestClient(create_app(database)) as client:
+        edit_response = client.get("/approvals/artists/die-arzte")
+        save_response = client.post(
+            "/approvals/artists/die-arzte",
+            data={
+                "candidate": candidate.musicbrainz_id,
+                "name": "Die Ärzte Berlin",
+                "artist_type": "Group",
+                "country": "DE",
+                "disambiguation": "German punk band",
+                "genres": "punk, rock",
+                "official_homepage": "https://www.bademeister.com/",
+            },
+            follow_redirects=False,
+        )
+
+    edited_artist = EventStore(database).get_artist("die-arzte")
+    assert edit_response.status_code == 200
+    assert 'name="genres"' in edit_response.text
+    assert save_response.status_code == 303
+    assert save_response.headers["location"] == "/artists/die-arzte"
+    assert edited_artist is not None
+    assert edited_artist.name == "Die Ärzte Berlin"
+    assert edited_artist.genres == ["punk", "rock"]
+
+    monkeypatch.setattr(
+        "berlin_events_explorer.webapp.MusicBrainzArtistProvider.discover",
+        lambda self, artist: [candidate],
+    )
+    with TestClient(create_app(database)) as client:
+        suggestion_response = client.post(
+            "/approvals/artists/die-arzte/discover", follow_redirects=False
+        )
+
+    refreshed_artist = EventStore(database).get_artist("die-arzte")
+    assert suggestion_response.status_code == 303
+    assert suggestion_response.headers["location"] == "/approvals/artists/die-arzte"
+    assert refreshed_artist is not None
+    assert refreshed_artist.status is ArtistStatus.VERIFIED
 
 
 @pytest.mark.anyio
