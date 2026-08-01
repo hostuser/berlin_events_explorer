@@ -426,7 +426,6 @@ def _render_invite_result_page(
     expires_at: datetime | None = None,
     error: str | None = None,
     csrf_token: str | None = None,
-    user: UserRecord | None = None,
 ) -> str:
     """Render the outcome of creating one invite, including its only URL copy."""
 
@@ -549,7 +548,6 @@ def _render_reset_link_page(
     email_sent: bool,
     expires_at: datetime,
     csrf_token: str | None = None,
-    user: UserRecord | None = None,
 ) -> str:
     """Render an admin-generated password reset link, shown exactly once."""
 
@@ -588,7 +586,6 @@ def _render_admin_users_page(
     notice: str | None = None,
     error: str | None = None,
     csrf_token: str | None = None,
-    user: UserRecord | None = None,
 ) -> str:
     """Render account and invite management for administrators."""
 
@@ -1146,7 +1143,6 @@ def create_app(
                     email=email,
                     error=error,
                     csrf_token=_csrf_token_from(request),
-                    user=admin,
                 ),
                 media_type="text/html",
                 status_code=400,
@@ -1172,7 +1168,6 @@ def create_app(
                 email_sent=email_sent,
                 expires_at=expires_at,
                 csrf_token=_csrf_token_from(request),
-                user=admin,
             ),
             media_type="text/html",
         )
@@ -1565,7 +1560,6 @@ def create_app(
                 notice=notice,
                 error=error,
                 csrf_token=_csrf_token_from(request),
-                user=request.scope.get("user"),
             ),
             media_type="text/html",
             status_code=status_code,
@@ -1736,7 +1730,6 @@ def create_app(
                 email_sent=email_sent,
                 expires_at=expires_at,
                 csrf_token=_csrf_token_from(request),
-                user=request.scope.get("user"),
             ),
             media_type="text/html",
         )
@@ -2352,7 +2345,6 @@ def create_app(
             return Response(
                 content=_render_settings_page(
                     csrf_token=_csrf_token_from(request),
-                    user=request.scope.get("user"),
                     threshold=_get_auto_approve_threshold(
                         store, auto_approve_threshold
                     ),
@@ -2428,7 +2420,6 @@ def create_app(
                 return Response(
                     content=_render_settings_page(
                         csrf_token=_csrf_token_from(request),
-                        user=request.scope.get("user"),
                         threshold=_get_auto_approve_threshold(
                             store, auto_approve_threshold
                         ),
@@ -2723,7 +2714,6 @@ def _render_settings_page(
     cleared: bool = False,
     error: str | None = None,
     csrf_token: str | None = None,
-    user: UserRecord | None = None,
 ) -> str:
     """Render operational settings with a development-only destructive action."""
 

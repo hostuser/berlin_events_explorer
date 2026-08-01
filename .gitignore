@@ -15,3 +15,4 @@ events.sqlite
 events.sqlite.*
 .hermes/
 events.sqlite*
+.envrc
