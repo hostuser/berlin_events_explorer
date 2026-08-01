@@ -147,3 +147,14 @@ def test_shell_links_to_the_account_page(tmp_path: Path) -> None:
     with TestClient(_app(tmp_path)) as client:
         login_as(client, role="user")
         assert 'href="/account"' in client.get("/").text
+
+
+def test_account_page_uses_the_closable_shell(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        login_as(client, role="user")
+        page = client.get("/account").text
+
+    assert 'class="settings-shell"' in page
+    assert 'class="settings-close" href="/"' in page
+    assert 'aria-label="Application views"' not in page
+    assert "Account settings" in page  # renamed heading

@@ -458,15 +458,11 @@ def _render_invite_result_page(
                  onfocus="this.select()" aria-label="Invite link" />
           {expiry}
         </section>"""
-    return _render_app_page(
+    return _render_settings_shell(
         title="Invite · Berlin Events Explorer",
-        active_tab="admin",
-        content=content,
         heading="Invitation",
         kicker="User management",
-        show_sync=False,
-        csrf_token=csrf_token,
-        user=user,
+        content=content,
     )
 
 
@@ -538,15 +534,11 @@ def _render_account_page(
           </form>
         </section>
       </div>"""
-    return _render_app_page(
+    return _render_settings_shell(
         title="Account · Berlin Events Explorer",
-        active_tab="account",
-        content=content,
-        heading="Your account",
+        heading="Account settings",
         kicker="Account",
-        show_sync=False,
-        csrf_token=csrf_token,
-        user=user,
+        content=content,
     )
 
 
@@ -581,15 +573,11 @@ def _render_reset_link_page(
         {escape(expires_at.strftime("%Y-%m-%d %H:%M %Z"))}.</p>
         <p><a href="/admin/users">← Back to user management</a></p>
       </section>"""
-    return _render_app_page(
+    return _render_settings_shell(
         title="Password reset link · Berlin Events Explorer",
-        active_tab="admin",
-        content=content,
         heading="Password reset link",
         kicker="User management",
-        show_sync=False,
-        csrf_token=csrf_token,
-        user=user,
+        content=content,
     )
 
 
@@ -717,15 +705,11 @@ def _render_admin_users_page(
           </form>
         </section>
       </div>"""
-    return _render_app_page(
+    return _render_settings_shell(
         title="Users · Berlin Events Explorer",
-        active_tab="admin",
-        content=content,
         heading="User management",
         kicker="Administration",
-        show_sync=False,
-        csrf_token=csrf_token,
-        user=user,
+        content=content,
     )
 
 
@@ -2812,15 +2796,11 @@ def _render_settings_page(
         </section>
         {reset}
       </div>"""
-    return _render_app_page(
+    return _render_settings_shell(
         title="Settings · Berlin Events Explorer",
-        active_tab="settings",
-        content=content,
         heading="Settings",
         kicker="Application controls",
-        show_sync=False,
-        csrf_token=csrf_token,
-        user=user,
+        content=content,
     )
 
 
@@ -3993,6 +3973,56 @@ def _render_app_nav(
         + approvals_link
         + "</nav>"
     )
+
+
+def _render_settings_shell(
+    *,
+    title: str,
+    heading: str,
+    kicker: str,
+    content: str,
+    close_href: str = "/",
+) -> str:
+    """Render a settings-area page without the app tab bar.
+
+    Closing returns to ``close_href`` (the main page by default). Settings-area
+    forms are plain POSTs, so this shell omits the Datastar signal machinery of
+    the app shell.
+
+    Args:
+        title: Document ``<title>``.
+        heading: Page ``<h1>`` text.
+        kicker: Small uppercase label above the heading.
+        content: Pre-rendered inner HTML (already escaped where needed).
+        close_href: Target of the close (✕) control.
+
+    Returns:
+        A complete HTML document.
+    """
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escape(title)}</title>
+    {theme.head_assets()}
+  </head>
+  <body class="settings-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <main id="main" class="settings-shell">
+      <header class="settings-shell-header">
+        <div>
+          <p class="page-kicker">{escape(kicker)}</p>
+          <h1>{escape(heading)}</h1>
+        </div>
+        <a class="settings-close" href="{escape(close_href, quote=True)}"
+           aria-label="Close settings">✕</a>
+      </header>
+      {content}
+    </main>
+  </body>
+</html>"""
 
 
 def _render_app_page(

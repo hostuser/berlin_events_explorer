@@ -450,6 +450,17 @@ _VIEWS = """
 .danger-button { background: var(--color-danger); color: var(--color-surface);
   border-color: var(--color-danger-strong); }
 
+/* --- settings shell (closable settings-area pages) --- */
+.settings-shell { max-width: 820px; margin: 0 auto; padding: var(--space-6) var(--space-4); }
+.settings-shell-header { display: flex; justify-content: space-between; align-items: flex-start;
+  gap: var(--space-3); padding-bottom: var(--space-4); margin-bottom: var(--space-5);
+  border-bottom: 1px solid var(--color-line); }
+.settings-close { display: inline-flex; align-items: center; justify-content: center;
+  flex: none; width: 2.35rem; height: 2.35rem; border: 1px solid var(--color-edge);
+  border-radius: var(--radius-md); background: var(--color-surface-sunken);
+  color: var(--color-text); text-decoration: none; font-size: 1.1rem; line-height: 1; }
+.settings-close:hover { background: var(--color-accent-wash); }
+
 /* --- venue & artist detail (shell content) --- */
 .detail-stack { display: grid; gap: var(--space-4); max-width: 760px;
   margin-top: var(--space-4); }

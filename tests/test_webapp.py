@@ -65,6 +65,19 @@ def _login(client: TestClient) -> None:
     login_as(client, role="admin")
 
 
+@pytest.mark.parametrize("path", ["/settings", "/admin/users"])
+def test_settings_area_pages_use_the_closable_shell(tmp_path, path: str) -> None:
+    """Settings-area pages drop the app tabs and expose a close-to-home control."""
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)  # admin
+        page = client.get(path).text
+
+    assert 'class="settings-shell"' in page
+    assert 'class="settings-close" href="/"' in page
+    assert 'aria-label="Application views"' not in page  # no app tab bar
+    assert 'id="tab-content"' not in page
+
+
 def _seed_event() -> Event:
     """Return a representative event used in test data."""
 
