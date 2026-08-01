@@ -613,7 +613,7 @@ def _render_admin_users_page(
     def role_options(selected: UserRole) -> str:
         return "".join(
             f'<option value="{role.value}"'
-            f"{" selected" if role is selected else ""}>{role.value}</option>"
+            f"{' selected' if role is selected else ''}>{role.value}</option>"
             for role in UserRole
         )
 
@@ -1707,9 +1707,7 @@ def create_app(
         status_code=200,
         guards=[requires_admin],
     )
-    async def create_reset_link(
-        request: Request, user_id: FromPath[int]
-    ) -> Response:
+    async def create_reset_link(request: Request, user_id: FromPath[int]) -> Response:
         """Generate a password reset link for one account."""
 
         def _prepare() -> tuple[str, str, datetime] | None:
@@ -1760,9 +1758,7 @@ def create_app(
         )
 
     @post("/admin/invites/{invite_id:int}/revoke", guards=[requires_admin])
-    async def revoke_invite(
-        request: Request, invite_id: FromPath[int]
-    ) -> Redirect:
+    async def revoke_invite(request: Request, invite_id: FromPath[int]) -> Redirect:
         """Withdraw one pending invitation."""
 
         def _handle() -> Redirect:
@@ -2664,9 +2660,7 @@ def _get_musicbrainz_metadata_fetch_limit(store: EventStore) -> int:
     return DEFAULT_MUSICBRAINZ_FETCH_LIMIT
 
 
-def _get_default_table_size(
-    store: EventStore, user: UserRecord | None = None
-) -> int:
+def _get_default_table_size(store: EventStore, user: UserRecord | None = None) -> int:
     """Return the account's preferred table row count, then the site default."""
 
     if user is not None:
@@ -2825,7 +2819,6 @@ def _render_settings_page(
         heading="Settings",
         kicker="Application controls",
         show_sync=False,
-        show_settings_link=False,
         csrf_token=csrf_token,
         user=user,
     )
@@ -2835,8 +2828,18 @@ def _render_settings_page(
 # locale, and the UI locale is English regardless of the host (§9.1-9.2).
 _WEEKDAY_ABBREVIATIONS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTH_ABBREVIATIONS = (
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
 )
 
 
@@ -2934,7 +2937,7 @@ def _render_venue_approval_form(
         f'<a class="suggestion{" selected" if candidate == selected else ""}" '
         f'href="/approvals/venues/{escape(venue.id)}?candidate_key={escape(_candidate_key(candidate), quote=True)}">'
         f"<strong>{escape(candidate.display_name)}</strong>"
-        f'{" " + _render_stamp("Selected") if candidate == selected else ""}<br>'
+        f"{' ' + _render_stamp('Selected') if candidate == selected else ''}<br>"
         f'<span class="muted">{escape(candidate.address or "No address suggested")} · '
         f"{escape(candidate.website or 'No homepage suggested')} · "
         f'<span class="confidence">confidence {candidate.confidence:.2f}</span></span></a>'
@@ -4003,7 +4006,6 @@ def _render_app_page(
     heading: str = "Berlin Events Explorer",
     kicker: str = "Berlin Events",
     show_sync: bool = True,
-    show_settings_link: bool = True,
     csrf_token: str | None = None,
     user: UserRecord | None = None,
 ) -> str:
@@ -4059,19 +4061,30 @@ def _render_app_page(
         if can_sync
         else ""
     )
-    settings_link = (
-        '<a class="settings-link" href="/settings" aria-label="Open settings">⚙ Settings</a>'
-        if show_settings_link
-        else ""
-    )
     if user is None:
         account_html = '<a class="settings-link" href="/login">Log in</a>'
     else:
+        site_settings_item = (
+            '<a role="menuitem" href="/settings">Site settings</a>'
+            if ROLE_ORDER[user.role] >= ROLE_ORDER[UserRole.ADMIN]
+            else ""
+        )
         account_html = (
-            f'<a class="settings-link" href="/account">{escape(user.display_name)}</a>'
-            '<form method="post" action="/logout" class="logout-form">'
+            '<details class="account-menu">'
+            '<summary class="account-menu-trigger">'
+            '<span class="account-menu-icon" aria-hidden="true">👤</span>'
+            f'<span class="account-menu-name">{escape(user.display_name)}</span>'
+            '<span class="account-menu-caret" aria-hidden="true">▾</span>'
+            "</summary>"
+            '<div class="account-menu-panel" role="menu">'
+            '<a role="menuitem" href="/account">Account settings</a>'
+            f"{site_settings_item}"
+            '<form method="post" action="/logout" class="account-menu-logout">'
             f"{_csrf_input(csrf_token)}"
-            '<button type="submit" class="logout-button">Log out</button></form>'
+            '<button role="menuitem" type="submit">Log out</button>'
+            "</form>"
+            "</div>"
+            "</details>"
         )
     sync_regions = (
         '<p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>\n'
@@ -4097,7 +4110,6 @@ def _render_app_page(
           <h1{heading_binding}>{escape(heading)}</h1>
           <div class="toolbar-actions">
             {sync_button}
-            {settings_link}
             {account_html}
           </div>
         </div>
@@ -4107,6 +4119,13 @@ def _render_app_page(
       <section id="tab-content">{content}</section>
     </main>
     <script>window.addEventListener('popstate', () => window.location.reload())</script>
+    <script>
+document.addEventListener('click', (event) => {{
+  document.querySelectorAll('details.account-menu[open]').forEach((menu) => {{
+    if (!menu.contains(event.target)) menu.removeAttribute('open');
+  }});
+}});
+    </script>
   </body>
 </html>"""
 

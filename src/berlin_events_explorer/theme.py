@@ -210,6 +210,27 @@ h1 { margin: .2rem 0 .5rem; font-family: var(--font-display);
   border-radius: var(--radius-md); color: var(--color-text);
   background: var(--color-surface-sunken); text-decoration: none; font-weight: 600; }
 .settings-link:hover { background: var(--color-accent-wash); }
+/* --- account menu (toolbar disclosure) --- */
+.account-menu { position: relative; }
+.account-menu > summary { display: inline-flex; align-items: center; gap: var(--space-1);
+  min-height: 2.35rem; padding: .45rem .75rem; border: 1px solid var(--color-edge);
+  border-radius: var(--radius-md); background: var(--color-surface-sunken);
+  color: var(--color-text); font-weight: 600; cursor: pointer; list-style: none; }
+.account-menu > summary::-webkit-details-marker { display: none; }
+.account-menu > summary:hover,
+.account-menu[open] > summary { background: var(--color-accent-wash); }
+.account-menu-caret { font-size: .8em; color: var(--color-text-muted); }
+.account-menu-panel { position: absolute; right: 0; top: calc(100% + var(--space-1));
+  z-index: 20; min-width: 12rem; display: grid; padding: var(--space-1);
+  background: var(--color-surface); border: 1px solid var(--color-edge);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-overlay); }
+.account-menu-panel a, .account-menu-panel button { display: block; width: 100%;
+  text-align: left; padding: .5rem .65rem; border: none; border-radius: var(--radius-sm);
+  background: none; color: var(--color-text); font: inherit; font-weight: 600;
+  text-decoration: none; cursor: pointer; }
+.account-menu-panel a:hover,
+.account-menu-panel button:hover { background: var(--color-accent-wash); }
+.account-menu-logout { margin: 0; }
 /* Primary action: ink on signal yellow with an ink border — the BVG move (§7.3). */
 .sync-button { border: 1px solid var(--color-accent-ink); padding: .5rem 1rem;
   border-radius: var(--radius-md); background: var(--color-accent);

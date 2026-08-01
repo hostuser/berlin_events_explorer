@@ -549,6 +549,43 @@ def test_top_level_views_share_application_shell(tmp_path, path: str) -> None:
     assert 'data-on:click="evt.preventDefault();' in response.text
 
 
+def test_account_menu_replaces_separate_controls(tmp_path) -> None:
+    """Admins get one dropdown with account, site settings, and logout."""
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        _login(client)  # admin
+        page = client.get("/").text
+
+    assert 'class="account-menu"' in page
+    assert '<a role="menuitem" href="/account">Account settings</a>' in page
+    assert '<a role="menuitem" href="/settings">Site settings</a>' in page
+    assert 'action="/logout"' in page
+    # The old standalone gear link is gone; /settings now only appears in the menu.
+    assert 'aria-label="Open settings"' not in page
+    assert page.count('href="/settings"') == 1
+
+
+def test_account_menu_hides_site_settings_for_non_admins(tmp_path) -> None:
+    """Only admins see the Site settings item."""
+    from conftest import login_as
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        login_as(client, role="user")
+        page = client.get("/").text
+
+    assert 'class="account-menu"' in page
+    assert 'href="/account"' in page  # Account settings present for everyone
+    assert 'href="/settings"' not in page  # Site settings admin-only
+    assert 'action="/logout"' in page
+
+
+def test_logged_out_shell_shows_login_not_menu(tmp_path) -> None:
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        page = client.get("/").text
+
+    assert 'class="account-menu"' not in page
+    assert ">Log in</a>" in page
+
+
 @pytest.mark.parametrize("path", ["/?tab=upcoming", "/?tab=venues", "/?tab=approvals"])
 def test_datastar_tab_fragments_patch_without_blocking_view_transition(
     tmp_path, path: str
