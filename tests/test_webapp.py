@@ -20,6 +20,8 @@ from berlin_events_explorer.models import (
     Event,
     EventSourceRef,
     Performer,
+    UserRecord,
+    UserRole,
     Venue,
     VenueCandidate,
     VenueRecord,
@@ -100,6 +102,20 @@ def _seed_events(total: int) -> list[Event]:
     return events
 
 
+def _admin_user() -> UserRecord:
+    """A minimal admin account for exercising admin-gated shell controls."""
+
+    now = datetime.now(UTC)
+    return UserRecord(
+        id=1,
+        email="admin@example.test",
+        display_name="Admin",
+        role=UserRole.ADMIN,
+        created_at=now,
+        updated_at=now,
+    )
+
+
 def _render_events_page_from(
     all_events: list[Event],
     *,
@@ -107,6 +123,7 @@ def _render_events_page_from(
     page: int,
     page_size: int,
     artist_ids_by_event_performer: dict[tuple[str, int], str] | None = None,
+    user: UserRecord | None = None,
 ) -> str:
     """Render a page with canonical pagination metadata."""
 
@@ -123,6 +140,7 @@ def _render_events_page_from(
         page_size=normalized_page_size,
         total_pages=total_pages,
         artist_ids_by_event_performer=artist_ids_by_event_performer,
+        user=user,
     )
 
 
@@ -164,6 +182,7 @@ def test_render_events_page_renders_table_rows() -> None:
         page=1,
         page_size=25,
         artist_ids_by_event_performer={("evt-0", 1): "dj-example"},
+        user=_admin_user(),
     )
 
     assert "Event 00" in page
@@ -687,6 +706,44 @@ def test_webapp_root_includes_manual_sync_trigger(tmp_path) -> None:
     assert "Sync now" in response.text
     assert 'href="/?tab=approvals&amp;page_size=' in response.text
     assert "Awaiting approval" in response.text
+
+
+def test_sync_button_hidden_for_anonymous_visitors(tmp_path) -> None:
+    """The sync trigger is an admin-only control, absent when logged out."""
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Sync now" not in response.text
+    assert 'class="sync-button"' not in response.text
+    assert 'id="sync-progress"' not in response.text
+
+
+def test_sync_button_hidden_for_non_admins(tmp_path) -> None:
+    """Editors can reach the approvals queue but not the admin-only sync control."""
+
+    from conftest import login_as
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        login_as(client, role="editor")
+        response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Sync now" not in response.text
+    assert 'class="sync-button"' not in response.text
+
+
+def test_sync_endpoint_rejects_non_admins(tmp_path) -> None:
+    """Even without the button, a non-admin POST to /sync is refused."""
+
+    from conftest import login_as
+
+    with TestClient(create_app(tmp_path / "events.sqlite")) as client:
+        login_as(client, role="editor")
+        response = _post(client, "/sync")
+
+    assert response.status_code == 403
 
 
 def test_webapp_search_endpoint_returns_datastar_event_panel_patch(tmp_path) -> None:

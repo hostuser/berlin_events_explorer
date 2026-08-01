@@ -2332,7 +2332,7 @@ def create_app(
             )
         return Redirect(f"/approvals/artists/{artist_id}", status_code=303)
 
-    @post("/sync", status_code=200, sync_to_thread=True, guards=[requires_editor])
+    @post("/sync", status_code=200, sync_to_thread=True, guards=[requires_admin])
     def sync(
         request: Request,
         page: int = 1,
@@ -4045,10 +4045,18 @@ def _render_app_page(
         if show_sync
         else ""
     )
+    # Syncing is an admin-only action, so its button and progress regions are
+    # rendered only for signed-in admins. ``show_sync`` still governs the
+    # event-count heading binding, which belongs to every list view.
+    can_sync = (
+        show_sync
+        and user is not None
+        and ROLE_ORDER[user.role] >= ROLE_ORDER[UserRole.ADMIN]
+    )
     sync_button = (
         f"""<button type="button" class="sync-button" data-attr="{{'disabled': $isSyncing}}"
               data-text="$isSyncing ? 'Syncing...' : 'Sync now'" data-on:click="{sync_action}">Sync now</button>"""
-        if show_sync
+        if can_sync
         else ""
     )
     settings_link = (
@@ -4068,7 +4076,7 @@ def _render_app_page(
     sync_regions = (
         '<p class="sync-error" data-show="$syncError !== null" data-text="$syncError"></p>\n'
         '      <section id="sync-progress" class="sync-progress" aria-live="polite"></section>'
-        if show_sync
+        if can_sync
         else ""
     )
     return f"""<!doctype html>
