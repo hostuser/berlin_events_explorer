@@ -276,3 +276,54 @@ def test_users_list_shows_accounts(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "a@b.example" in result.output
     assert "editor" in result.output
+
+
+def test_users_change_password_updates_the_account(tmp_path: Path) -> None:
+    from berlin_events_explorer import auth
+    from berlin_events_explorer.models import UserRole
+
+    database = tmp_path / "events.sqlite"
+    EventStore(database).create_user(
+        email="a@b.example",
+        password_hash=auth.hash_password("old-password"),
+        display_name="Ada",
+        role=UserRole.EDITOR,
+    )
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "users",
+            "change-password",
+            "--database",
+            str(database),
+            "--email",
+            "A@B.EXAMPLE",
+        ],
+        input="new-password\nnew-password\n",
+    )
+
+    credentials = EventStore(database).get_user_credentials("a@b.example")
+    assert result.exit_code == 0, result.output
+    assert "Password changed for a@b.example" in result.output
+    assert credentials is not None
+    assert auth.verify_password(credentials.password_hash, "new-password")
+    assert not auth.verify_password(credentials.password_hash, "old-password")
+
+
+def test_users_change_password_rejects_unknown_users(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "users",
+            "change-password",
+            "--database",
+            str(tmp_path / "events.sqlite"),
+            "--email",
+            "missing@example.test",
+        ],
+        input="new-password\nnew-password\n",
+    )
+
+    assert result.exit_code != 0
+    assert "No user found" in result.output

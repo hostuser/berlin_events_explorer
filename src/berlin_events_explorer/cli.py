@@ -240,6 +240,42 @@ def users_create_admin(
     console.print(f"[bold]Administrator {user.email} created[/bold]")
 
 
+@users.command("change-password")
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+@click.option("--email", prompt=True, help="Email address of the account.")
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=True,
+    help="New password (prompted interactively when omitted).",
+)
+def users_change_password(database: Path, email: str, password: str) -> None:
+    """Change the password for an existing web UI account."""
+
+    if len(password) < 10:
+        raise click.ClickException("Choose a password of at least 10 characters.")
+
+    store = EventStore(database)
+    credentials = store.get_user_credentials(email)
+    if credentials is None:
+        raise click.ClickException(f"No user found for email {email!r}.")
+
+    updated = store.update_user(
+        credentials.user.id,
+        password_hash=hash_password(password),
+    )
+    if updated is None:
+        raise click.ClickException(f"No user found for email {credentials.user.email!r}.")
+    console.print(f"[bold]Password changed for {updated.email}[/bold]")
+
+
 @users.command("list")
 @click.option(
     "--database",
