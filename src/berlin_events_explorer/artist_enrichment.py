@@ -144,7 +144,7 @@ class MusicBrainzArtistProvider:
         cache_dir: Path | None = None,
         request_interval_seconds: float = DEFAULT_MUSICBRAINZ_REQUEST_INTERVAL_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
-        monotonic: Callable[[], float] = time.monotonic,
+        clock: Callable[[], float] = time.time,
         random_float: Callable[[], float] = random.random,
     ) -> None:
         if not 1.0 <= request_interval_seconds <= 300.0:
@@ -161,7 +161,7 @@ class MusicBrainzArtistProvider:
         self._pacer = _RequestPacer(directory)
         self._interval = request_interval_seconds
         self._sleep = sleep
-        self._monotonic = monotonic
+        self._clock = clock
         self._random_float = random_float
 
     def discover(
@@ -349,7 +349,7 @@ class MusicBrainzArtistProvider:
         raise AssertionError("unreachable")
 
     def _reserve_slot(self) -> None:
-        delay = self._pacer.reserve("musicbrainz", self._interval, self._monotonic())
+        delay = self._pacer.reserve("musicbrainz", self._interval, self._clock())
         if delay > 0:
             self._sleep(delay)
 

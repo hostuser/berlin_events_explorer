@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime
 
+import sqlite3
+
 import diskcache
 import httpx
 import pytest
@@ -65,6 +67,39 @@ def test_musicbrainz_provider_uses_identified_json_request_and_caches_response(
     assert first[0].display_name == "Die Ärzte"
     assert first[0].provider_score == 100
     assert first == second
+
+
+def test_musicbrainz_provider_recovers_from_a_pre_reboot_pacing_value(tmp_path) -> None:
+    """A persisted monotonic-clock value must never delay a fresh boot for days."""
+
+    requests: list[httpx.Request] = []
+    cache_path = tmp_path / "cache"
+    with diskcache.Cache(cache_path) as cache:
+        pacer_path = cache_path / "pacer.sqlite"
+        with sqlite3.connect(pacer_path) as connection:
+            connection.execute(
+                "CREATE TABLE provider_pacing (provider TEXT PRIMARY KEY, next_request_at REAL NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO provider_pacing VALUES (?, ?)",
+                ("musicbrainz", 1_878_883.0),
+            )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"artists": []})
+
+        sleeps: list[float] = []
+        provider = MusicBrainzArtistProvider(
+            httpx.Client(transport=httpx.MockTransport(handler)),
+            cache=cache,
+            clock=lambda: 1_786_190_000.0,
+            sleep=sleeps.append,
+        )
+        provider.discover(_artist())
+
+    assert len(requests) == 1
+    assert sleeps == []
 
 
 def test_musicbrainz_provider_extracts_streaming_platform_links(tmp_path) -> None:
