@@ -911,3 +911,60 @@ def test_delete_auth_token_removes_exactly_one_token(tmp_path) -> None:
 
     assert store.get_auth_token("invite-a", purpose="invite") is None
     assert store.get_auth_token("invite-b", purpose="invite") is not None
+
+
+def test_find_venue_by_osm_identity_returns_none_without_match(tmp_path) -> None:
+    """No OSM identity on any venue returns None."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.upsert_venue(
+        VenueRecord(
+            id="club-a",
+            name="Club A",
+            normalized_name="club a",
+            status=VenueStatus.UNRESOLVED,
+        )
+    )
+
+    assert store.find_venue_by_osm_identity("node", "999") is None
+
+
+def test_find_venue_by_osm_identity_returns_the_linked_venue(tmp_path) -> None:
+    """A venue carrying the OSM identity is returned."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.upsert_venue(
+        VenueRecord(
+            id="club-a",
+            name="Club A",
+            normalized_name="club a",
+            status=VenueStatus.VERIFIED,
+            osm_type="node",
+            osm_id="123",
+        )
+    )
+
+    found = store.find_venue_by_osm_identity("node", "123")
+    assert found is not None
+    assert found.id == "club-a"
+
+
+def test_find_venue_by_osm_identity_works_inside_transaction(tmp_path) -> None:
+    """The lookup can share an ongoing connection."""
+
+    store = EventStore(tmp_path / "events.sqlite")
+    store.upsert_venue(
+        VenueRecord(
+            id="club-a",
+            name="Club A",
+            normalized_name="club a",
+            status=VenueStatus.VERIFIED,
+            osm_type="node",
+            osm_id="123",
+        )
+    )
+
+    with store.engine.connect() as connection:
+        found = store.find_venue_by_osm_identity("node", "123", connection=connection)
+    assert found is not None
+    assert found.id == "club-a"

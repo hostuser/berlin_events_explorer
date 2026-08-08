@@ -125,6 +125,7 @@ def test_sync_cli_clear_cache_option(tmp_path, monkeypatch) -> None:
         *,
         http_cache=None,
         auto_approve_threshold=0.9,
+        performer_extractor=None,
     ) -> tuple[SyncResult, VenueIngestionResult]:
         assert http_cache is cache
         assert cache.cleared
@@ -196,6 +197,7 @@ def test_sync_cli_keeps_cache_by_default(tmp_path, monkeypatch) -> None:
         *,
         http_cache=None,
         auto_approve_threshold=0.9,
+        performer_extractor=None,
     ) -> tuple[SyncResult, VenueIngestionResult]:
         assert http_cache is cache
         assert not cache.cleared

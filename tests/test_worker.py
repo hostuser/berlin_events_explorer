@@ -26,12 +26,14 @@ def test_development_worker_units_serialize_timer_invocations() -> None:
     assert "Type=oneshot" in service
     assert "/usr/bin/flock --nonblock --conflict-exit-code 75" in service
     assert "berlin-events worker" in service
+    assert "EnvironmentFile=-%h/.config/berlin-events/development.env" in service
     assert "SuccessExitStatus=75" in service
     assert "OnCalendar=*:0/30" in timer
     assert "Persistent=true" in timer
     assert "berlin-events-worker-development.service" in timer
 
     web_service = (root / "deploy" / "berlin-events-development.service").read_text()
+    assert "EnvironmentFile=-%h/.config/berlin-events/development.env" in web_service
     assert "--sync-interval-minutes 0" in web_service
 
 
@@ -53,6 +55,7 @@ def test_production_worker_units_run_hourly_without_web_process_sync() -> None:
         in worker_service
     )
     assert "SuccessExitStatus=75" in worker_service
+    assert "EnvironmentFile=-%h/.config/berlin-events/web.env" in worker_service
     assert "OnCalendar=hourly" in timer
     assert "Persistent=true" in timer
     assert "berlin-events-worker-production.service" in timer

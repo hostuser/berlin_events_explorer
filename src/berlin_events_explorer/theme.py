@@ -461,6 +461,15 @@ _VIEWS = """
   color: var(--color-text); text-decoration: none; font-size: 1.1rem; line-height: 1; }
 .settings-close:hover { background: var(--color-accent-wash); }
 
+/* --- event detail --- */
+.event-detail-grid { display: grid; gap: var(--space-4); align-items: start;
+  max-width: 1120px; margin-top: var(--space-4); }
+.event-detail-grid .venue-map { margin: 0; }
+.event-detail-grid .venue-map iframe { min-height: 28rem; }
+@media (min-width: 880px) {
+  .event-detail-grid { grid-template-columns: minmax(0, 1fr) minmax(22rem, .9fr); }
+}
+
 /* --- venue & artist detail (shell content) --- */
 .detail-stack { display: grid; gap: var(--space-4); max-width: 760px;
   margin-top: var(--space-4); }

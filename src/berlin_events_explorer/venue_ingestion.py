@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Protocol
 
 import httpx
 from diskcache import Cache
 
 from berlin_events_explorer.models import VenueCandidate, VenueRecord, VenueStatus
+from berlin_events_explorer.performer_title_augmentation import (
+    PerformerExtractor,
+    ingest_new_event_performers,
+)
 from berlin_events_explorer.sources.base import EventSource
 from berlin_events_explorer.storage import EventStore
 from berlin_events_explorer.sync import SyncResult, sync_source
@@ -52,10 +56,21 @@ def sync_source_and_ingest_venues(
     http_cache: Cache | None = None,
     auto_approve_threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
     progress: VenueProgressCallback | None = None,
+    performer_extractor: PerformerExtractor | None = None,
 ) -> tuple[SyncResult, VenueIngestionResult]:
-    """Synchronize events, then catalog and enrich only newly encountered venues."""
+    """Synchronize events, extract new billed performers, then ingest new venues."""
 
     sync_result = sync_source(source, store, client, http_cache=http_cache)
+    if performer_extractor is not None and sync_result.created_event_ids:
+        performer_result = ingest_new_event_performers(
+            store, performer_extractor, event_ids=sync_result.created_event_ids
+        )
+        sync_result = replace(
+            sync_result,
+            performer_extracted=performer_result.extracted,
+            performer_no_match=performer_result.no_match,
+            performer_errors=performer_result.errors,
+        )
     venue_result = ingest_new_event_venues(
         store,
         NominatimVenueProvider(client),

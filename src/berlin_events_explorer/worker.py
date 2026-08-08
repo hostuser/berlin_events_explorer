@@ -18,6 +18,9 @@ from berlin_events_explorer.artist_enrichment import (
 )
 from berlin_events_explorer.artist_homepage_ingestion import enrich_artist_homepages
 from berlin_events_explorer.artist_ingestion import enrich_artists
+from berlin_events_explorer.performer_title_augmentation import (
+    performer_extractor_from_environment,
+)
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import EventStore, WorkerRun
 from berlin_events_explorer.sync import open_sync_cache
@@ -111,6 +114,7 @@ def run_default_worker(
         else _get_musicbrainz_metadata_fetch_limit(store)
     )
 
+    performer_extractor = performer_extractor_from_environment()
     with (
         httpx.Client(timeout=30.0, follow_redirects=True) as client,
         open_sync_cache() as sync_cache,
@@ -129,6 +133,7 @@ def run_default_worker(
                 client,
                 http_cache=sync_cache,
                 auto_approve_threshold=auto_approve_threshold,
+                performer_extractor=performer_extractor,
             )
             return {
                 "events": asdict(sync_result),

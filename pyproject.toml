@@ -31,6 +31,7 @@ dependencies = [
     "uvicorn>=0.29",
     "argon2-cffi>=23.1",
     "litestar-email[smtp]>=0.4.0",
+    "pydantic-ai-slim[openai]>=1.0",
 ]
 dynamic = ["version"]
 

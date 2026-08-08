@@ -30,6 +30,10 @@ class SyncResult:
     unchanged: int
     errors: int = 0
     deleted: int = 0
+    created_event_ids: tuple[str, ...] = ()
+    performer_extracted: int = 0
+    performer_no_match: int = 0
+    performer_errors: int = 0
 
 
 class SyncError(RuntimeError):
@@ -182,12 +186,14 @@ def _sync_payload_from_text(
     content_hash = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
 
     created = updated = unchanged = deleted = 0
+    created_event_ids: list[str] = []
     try:
         with store.engine.begin() as connection:
             for event in events:
                 result = store.upsert(event, connection=connection, now=now)
                 if result.action == "created":
                     created += 1
+                    created_event_ids.append(event.id)
                 elif result.action == "updated":
                     updated += 1
                 else:
@@ -239,6 +245,7 @@ def _sync_payload_from_text(
         unchanged=unchanged,
         errors=len(parse_result.issues),
         deleted=deleted,
+        created_event_ids=tuple(created_event_ids),
     )
 
 

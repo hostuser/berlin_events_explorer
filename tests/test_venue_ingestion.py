@@ -167,6 +167,49 @@ def test_source_sync_enriches_new_venue_in_same_workflow(tmp_path) -> None:
     assert venue.status is VenueStatus.VERIFIED
 
 
+def test_source_sync_extracts_performers_for_new_list_titles(tmp_path) -> None:
+    """Created events receive safe title extraction before artist catalog ingestion."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "nominatim.openstreetmap.org":
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200,
+            text=(
+                "Date,Note,Artist,Venue\n"
+                '01.08.2026,,"Magma Festival - Anthony Naples, Deki Alem und Joy Orbison plus more tba",Example Club\n'
+            ),
+        )
+
+    class _Extractor:
+        def extract(self, title: str):
+            assert title.startswith("Magma Festival -")
+            from berlin_events_explorer.models import Performer
+
+            return [
+                Performer(name="Anthony Naples", billing_order=1),
+                Performer(name="Deki Alem", billing_order=2),
+                Performer(name="Joy Orbison", billing_order=3),
+            ]
+
+    store = EventStore(tmp_path / "events.sqlite")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        sync_result, _ = sync_source_and_ingest_venues(
+            MyTrueIntentSource(),
+            store,
+            client,
+            performer_extractor=_Extractor(),
+        )
+
+    event = store.list_events()[0]
+    assert sync_result.performer_extracted == 1
+    assert [performer.name for performer in event.performers] == [
+        "Anthony Naples",
+        "Deki Alem",
+        "Joy Orbison",
+    ]
+
+
 def test_new_venue_ingestion_reports_each_enrichment_step(tmp_path) -> None:
     """Callers receive a completed/total update while each venue is queried."""
 

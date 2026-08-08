@@ -77,7 +77,10 @@ def test_venue_rows_keep_table_semantics(tmp_path) -> None:
     with TestClient(app=app) as client:
         response = client.get("/?tab=venues", follow_redirects=True)
     assert 'role="link"' not in response.text
-    assert "<tr" not in response.text or 'tr class="venue-row" tabindex' not in response.text
+    assert (
+        "<tr" not in response.text
+        or 'tr class="venue-row" tabindex' not in response.text
+    )
 
 
 @pytest.mark.parametrize(

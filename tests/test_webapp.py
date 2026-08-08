@@ -1024,6 +1024,55 @@ def test_venue_approval_rejects_invalid_edits_without_publishing_candidate(
     assert venue.website is None
 
 
+def test_venue_approval_rejects_osm_identity_already_claimed_by_other_venue(
+    tmp_path,
+) -> None:
+    """Approving a candidate whose OSM identity belongs to another venue fails cleanly."""
+
+    database = tmp_path / "events.sqlite"
+    store = EventStore(database)
+    _seed_pending_venue(store)
+    # A second venue already verified with the same OSM identity (node/123).
+    store.upsert_venue(
+        VenueRecord(
+            id="duplicate-club",
+            name="Duplicate Club",
+            normalized_name="duplicate club",
+            status=VenueStatus.VERIFIED,
+            osm_type="node",
+            osm_id="123",
+            address="Suggested Street 1, 10115 Berlin",
+        )
+    )
+
+    with TestClient(create_app(database)) as client:
+        _login(client)
+        response = _post(
+            client,
+            "/approvals/venues/example-club",
+            data={
+                "action": "approve",
+                "provider": "nominatim",
+                "osm_type": "node",
+                "osm_id": "123",
+                "name": "Example Club",
+                "address": "Suggested Street 1, 10115 Berlin",
+                "postal_code": "10115",
+                "city": "Berlin",
+                "country": "DE",
+                "website": "https://suggested.example/",
+            },
+            follow_redirects=False,
+        )
+
+    venue = store.get_venue("example-club")
+    assert response.status_code == 400
+    assert venue is not None
+    assert venue.status is VenueStatus.CANDIDATE
+    assert "already linked to another verified venue" in response.text
+    assert "Duplicate Club" in response.text
+
+
 def test_venue_approval_can_discover_suggestions_on_demand(
     tmp_path, monkeypatch
 ) -> None:

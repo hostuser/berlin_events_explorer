@@ -39,6 +39,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
+from berlin_events_explorer.ai_event_research import EventResearchObservation
+from berlin_events_explorer.event_details import EventDetails
 from berlin_events_explorer.migrations import migrate_database
 from berlin_events_explorer.models import (
     ArtistCandidate,
@@ -87,6 +89,42 @@ events_table = Table(
         Computed("json_extract(event_json, '$.title')", persisted=False),
     ),
     Column("search_text", Text),
+)
+event_details_table = Table(
+    "event_details",
+    metadata,
+    Column(
+        "event_id",
+        String(64),
+        ForeignKey("events.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("provider", String(100), nullable=False, index=True),
+    Column("event_url", Text),
+    Column("ticket_url", Text),
+    Column("observed_status", String(30)),
+    Column("evidence_url", Text),
+    Column("confidence", String(30)),
+    Column("checked_at", DateTime(timezone=True), nullable=False, index=True),
+    Column("status_expires_at", DateTime(timezone=True)),
+    Column("last_successful_at", DateTime(timezone=True)),
+    Column("details_json", JSON, nullable=False),
+)
+event_research_table = Table(
+    "event_research",
+    metadata,
+    Column(
+        "event_id",
+        String(64),
+        ForeignKey("events.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("provider", String(100), nullable=False, index=True),
+    Column("event_url", Text, nullable=False),
+    Column("ticket_url", Text),
+    Column("evidence_url", Text, nullable=False),
+    Column("summary", Text),
+    Column("checked_at", DateTime(timezone=True), nullable=False, index=True),
 )
 venues_table = Table(
     "venues",
@@ -1004,6 +1042,130 @@ class EventStore:
             rows = connection.execute(select(events_table.c.event_json)).all()
         return [Event.model_validate(row[0]) for row in rows]
 
+    def get_event(self, event_id: str) -> Event | None:
+        """Return one source event by its stable opaque identifier."""
+
+        with self.engine.connect() as connection:
+            payload = connection.execute(
+                select(events_table.c.event_json).where(events_table.c.id == event_id)
+            ).scalar_one_or_none()
+        return Event.model_validate(payload) if payload is not None else None
+
+    def save_event_details(self, details: EventDetails) -> None:
+        """Create or replace the current observed detail overlay for an event."""
+
+        values = details.model_dump(mode="python")
+        values["observed_status"] = (
+            details.observed_status.value
+            if details.observed_status is not None
+            else None
+        )
+        values["details_json"] = values.pop("details")
+        statement = sqlite_insert(event_details_table).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[event_details_table.c.event_id],
+            set_={
+                key: getattr(statement.excluded, key)
+                for key in values
+                if key != "event_id"
+            },
+        )
+        with self.engine.begin() as connection:
+            connection.execute(statement)
+
+    def get_event_details(self, event_id: str) -> EventDetails | None:
+        """Return the independently stored event details, if checked before."""
+
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(event_details_table).where(
+                        event_details_table.c.event_id == event_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _event_details_from_row(row) if row is not None else None
+
+    def list_events_needing_event_details(
+        self, provider: str, *, checked_before: datetime, limit: int
+    ) -> list[Event]:
+        """Return bounded events never checked or stale for the requested provider."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(events_table.c.event_json)
+                .outerjoin(
+                    event_details_table,
+                    event_details_table.c.event_id == events_table.c.id,
+                )
+                .where(
+                    or_(
+                        event_details_table.c.event_id.is_(None),
+                        event_details_table.c.provider != provider,
+                        event_details_table.c.checked_at < checked_before,
+                    )
+                )
+                .order_by(events_table.c.start_date, events_table.c.id)
+                .limit(limit)
+            ).all()
+        return [Event.model_validate(row[0]) for row in rows]
+
+    def save_event_research(self, research: EventResearchObservation) -> None:
+        """Create or replace the latest bounded AI research overlay for an event."""
+
+        values = research.model_dump(mode="python")
+        statement = sqlite_insert(event_research_table).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[event_research_table.c.event_id],
+            set_={
+                key: getattr(statement.excluded, key)
+                for key in values
+                if key != "event_id"
+            },
+        )
+        with self.engine.begin() as connection:
+            connection.execute(statement)
+
+    def get_event_research(self, event_id: str) -> EventResearchObservation | None:
+        """Return the latest independently saved AI research, if available."""
+
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(event_research_table).where(
+                        event_research_table.c.event_id == event_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _event_research_from_row(row) if row is not None else None
+
+    def list_events_needing_event_research(
+        self, *, checked_before: datetime, limit: int
+    ) -> list[Event]:
+        """Return a bounded batch with missing or stale AI research observations."""
+
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(events_table.c.event_json)
+                .outerjoin(
+                    event_research_table,
+                    event_research_table.c.event_id == events_table.c.id,
+                )
+                .where(
+                    or_(
+                        event_research_table.c.event_id.is_(None),
+                        event_research_table.c.checked_at < checked_before,
+                    )
+                )
+                .order_by(events_table.c.start_date, events_table.c.id)
+                .limit(limit)
+            ).all()
+        return [Event.model_validate(row[0]) for row in rows]
+
     def query_events(
         self,
         *,
@@ -1617,6 +1779,36 @@ class EventStore:
             )
         return _venue_from_row(row) if row is not None else None
 
+    def find_venue_by_osm_identity(
+        self,
+        osm_type: str,
+        osm_id: str,
+        *,
+        connection: Connection | None = None,
+    ) -> VenueRecord | None:
+        """Return the canonical venue already linked to an OSM identity, or None.
+
+        Used to detect duplicate-Osm-identity collisions before writing.
+        """
+
+        def _query(conn: Connection) -> VenueRecord | None:
+            row = (
+                conn.execute(
+                    select(venues_table).where(
+                        venues_table.c.osm_type == osm_type,
+                        venues_table.c.osm_id == osm_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return _venue_from_row(row) if row is not None else None
+
+        if connection is None:
+            with self.engine.connect() as conn:
+                return _query(conn)
+        return _query(connection)
+
     def list_venues(self) -> list[VenueRecord]:
         """Return canonical venues ordered for predictable review output."""
 
@@ -2114,6 +2306,27 @@ def _comparison_payload(payload: dict[str, Any]) -> dict[str, Any]:
         for key, value in payload.items()
         if key not in {"first_seen_at", "last_seen_at"}
     }
+
+
+def _event_details_from_row(row: Any) -> EventDetails:
+    """Convert one SQLite overlay row into its validated public representation."""
+
+    values = dict(row)
+    values["details"] = values.pop("details_json")
+    values["confidence"] = (
+        float(values["confidence"]) if values["confidence"] is not None else None
+    )
+    for field in ("checked_at", "status_expires_at", "last_successful_at"):
+        values[field] = _as_utc(values[field])
+    return EventDetails.model_validate(values)
+
+
+def _event_research_from_row(row: Any) -> EventResearchObservation:
+    """Convert one SQLite row into a validated AI research observation."""
+
+    values = dict(row)
+    values["checked_at"] = _as_utc(values["checked_at"])
+    return EventResearchObservation.model_validate(values)
 
 
 def _artist_from_row(row: Any) -> ArtistRecord:

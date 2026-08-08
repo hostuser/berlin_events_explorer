@@ -11,7 +11,8 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
+import os
 from pathlib import Path
 
 import click
@@ -30,6 +31,20 @@ from berlin_events_explorer.artist_homepage_ingestion import enrich_artist_homep
 from berlin_events_explorer.artist_ingestion import enrich_artists
 from berlin_events_explorer.artists import bootstrap_artist_catalog
 from berlin_events_explorer.augment import AugmentError, augment_events
+from berlin_events_explorer.ai_event_research import (
+    SearxngEventResearcher,
+    create_event_research_agent,
+)
+from berlin_events_explorer.event_details_augmentation import (
+    augment_event_details,
+    augment_ticketmaster_event_details,
+)
+from berlin_events_explorer.event_research_augmentation import augment_event_research
+from berlin_events_explorer.performer_title_augmentation import (
+    augment_existing_event_performers,
+    performer_extractor_from_environment,
+)
+from berlin_events_explorer.searxng import SearxngClient
 from berlin_events_explorer.migrations import (
     AtlasMigrationError,
     migrate_database,
@@ -40,6 +55,7 @@ from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.auth import hash_password
 from berlin_events_explorer.models import UserRole
 from berlin_events_explorer.storage import EventStore
+from berlin_events_explorer.ticketmaster import TicketmasterDiscoveryClient
 from berlin_events_explorer.venue_enrichment import (
     DEFAULT_AUTO_APPROVE_THRESHOLD,
     NominatimVenueProvider,
@@ -139,6 +155,10 @@ def sync(
 ) -> None:
     """Synchronize events from configured sources."""
     store = EventStore(database)
+    try:
+        performer_extractor = performer_extractor_from_environment()
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
         try:
             with open_sync_cache(cache_dir) as cache:
@@ -151,6 +171,7 @@ def sync(
                     client,
                     http_cache=cache,
                     auto_approve_threshold=auto_approve_threshold,
+                    performer_extractor=performer_extractor,
                 )
         except SyncError as exc:
             raise click.ClickException(str(exc))
@@ -191,6 +212,203 @@ def augment(database: Path) -> None:
         f"[bold]Augment complete[/bold]: "
         f"{result.updated} updated, {result.unchanged} unchanged, "
         f"{result.processed} processed"
+    )
+
+
+@cli.command("augment-performers")
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+@click.option(
+    "--from-date",
+    type=click.DateTime(formats=("%Y-%m-%d",)),
+    default=None,
+    help="Inclusive first event date (YYYY-MM-DD).",
+)
+@click.option(
+    "--to-date",
+    type=click.DateTime(formats=("%Y-%m-%d",)),
+    default=None,
+    help="Inclusive last event date (YYYY-MM-DD).",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1, max=1000),
+    default=100,
+    show_default=True,
+    help="Maximum existing events to process after date filtering.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Run model extraction but do not write performer records or logs.",
+)
+def augment_performers_command(
+    database: Path,
+    from_date: datetime | None,
+    to_date: datetime | None,
+    limit: int,
+    dry_run: bool,
+) -> None:
+    """Extract safe performer lists from titles of existing, dated events."""
+
+    try:
+        extractor = performer_extractor_from_environment(require_enabled=False)
+        if extractor is None:
+            raise ValueError("No title performer extractor is configured")
+        result = augment_existing_event_performers(
+            EventStore(database),
+            extractor,
+            from_date=from_date.date() if from_date else None,
+            to_date=to_date.date() if to_date else None,
+            limit=limit,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    mode = "would update" if dry_run else "updated"
+    console.print(
+        f"[bold]Performer title augmentation complete[/bold]: "
+        f"{result.extracted} {mode}, {result.no_match} no match, "
+        f"{result.errors} errors, {result.considered} considered"
+    )
+
+
+@cli.command("augment-event-details")
+@click.option(
+    "--database",
+    type=click.Path(path_type=Path),
+    default=Path("events.sqlite"),
+    show_default=True,
+    help="SQLite database path.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1, max=1000),
+    default=100,
+    show_default=True,
+    help="Maximum stale or unobserved events to process.",
+)
+@click.option(
+    "--provider",
+    type=click.Choice(
+        ["source-links", "ticketmaster-discovery", "searxng-pydantic-ai"]
+    ),
+    default="source-links",
+    show_default=True,
+    help="The explicitly selected event-details provider.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report external-provider matches without writing observations.",
+)
+def augment_event_details_command(
+    database: Path, limit: int, provider: str, dry_run: bool
+) -> None:
+    """Augment a bounded batch with the selected safe event-details provider."""
+
+    store = EventStore(database)
+    if provider == "source-links":
+        if dry_run:
+            raise click.ClickException(
+                "--dry-run is available for ticketmaster-discovery only"
+            )
+        result = augment_event_details(store, limit=limit)
+        console.print(
+            f"[bold]Event details augment complete[/bold]: "
+            f"{result.updated} updated, {result.considered} considered"
+        )
+        return
+
+    if provider == "searxng-pydantic-ai":
+        searxng_url = os.environ.get("BERLIN_EVENTS_SEARXNG_URL", "").strip()
+        model = os.environ.get("BERLIN_EVENTS_EVENT_RESEARCH_MODEL", "").strip()
+        if not searxng_url:
+            raise click.ClickException(
+                "Set BERLIN_EVENTS_SEARXNG_URL before using searxng-pydantic-ai"
+            )
+        if not model:
+            raise click.ClickException(
+                "Set BERLIN_EVENTS_EVENT_RESEARCH_MODEL before using searxng-pydantic-ai"
+            )
+        zai_api_key = os.environ.get("ZAI_API_KEY", "").strip()
+        if model.startswith("zai:") and not zai_api_key:
+            raise click.ClickException(
+                "Set ZAI_API_KEY before using a zai: event research model"
+            )
+        try:
+            with httpx.Client(
+                timeout=10.0,
+                follow_redirects=False,
+                headers={"User-Agent": "BerlinEventsExplorer/1.0"},
+            ) as http_client:
+                researcher = SearxngEventResearcher(
+                    SearxngClient(searxng_url, http_client),
+                    agent=create_event_research_agent(
+                        model, zai_api_key=zai_api_key or None
+                    ),
+                )
+                result = augment_event_research(
+                    store, researcher, limit=limit, dry_run=dry_run
+                )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        table = Table(title="SearXNG + Pydantic AI research results")
+        table.add_column("Event ID")
+        table.add_column("Decision")
+        table.add_column("Evidence")
+        for outcome in result.outcomes:
+            table.add_row(
+                outcome.event_id,
+                outcome.decision,
+                outcome.evidence_url or "—",
+            )
+        console.print(table)
+        mode = "would update" if dry_run else "updated"
+        console.print(
+            f"[bold]AI event research complete[/bold]: {result.matched} matched, "
+            f"{result.updated} {mode}, {result.considered} considered"
+        )
+        return
+
+    api_key = os.environ.get("BERLIN_EVENTS_TICKETMASTER_API_KEY", "").strip()
+    if not api_key:
+        raise click.ClickException(
+            "Set BERLIN_EVENTS_TICKETMASTER_API_KEY before using ticketmaster-discovery"
+        )
+    with httpx.Client(timeout=10.0, follow_redirects=False) as http_client:
+        result = augment_ticketmaster_event_details(
+            store,
+            TicketmasterDiscoveryClient(api_key, http_client),
+            limit=limit,
+            dry_run=dry_run,
+        )
+    table = Table(title="Ticketmaster Discovery results")
+    table.add_column("Event ID")
+    table.add_column("Decision")
+    table.add_column("Provider event")
+    table.add_column("Evidence")
+    for outcome in result.outcomes:
+        table.add_row(
+            outcome.event_id,
+            outcome.decision,
+            outcome.provider_event_id or "—",
+            ", ".join(outcome.rationale) or "—",
+        )
+    console.print(table)
+    mode = "would update" if dry_run else "updated"
+    console.print(
+        f"[bold]Ticketmaster event-details augment complete[/bold]: "
+        f"{result.matched} matched, {result.updated} {mode}, "
+        f"{result.considered} considered"
     )
 
 
@@ -272,7 +490,9 @@ def users_change_password(database: Path, email: str, password: str) -> None:
         password_hash=hash_password(password),
     )
     if updated is None:
-        raise click.ClickException(f"No user found for email {credentials.user.email!r}.")
+        raise click.ClickException(
+            f"No user found for email {credentials.user.email!r}."
+        )
     console.print(f"[bold]Password changed for {updated.email}[/bold]")
 
 
@@ -295,9 +515,7 @@ def users_list(database: Path) -> None:
             account.display_name,
             account.role.value,
             "yes" if account.is_active else "no",
-            account.last_login_at.date().isoformat()
-            if account.last_login_at
-            else "—",
+            account.last_login_at.date().isoformat() if account.last_login_at else "—",
         )
     console.print(table)
 

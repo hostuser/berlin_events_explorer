@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=%h/.local/share/berlin-events-explorer/releases/current
+EnvironmentFile=-%h/.config/berlin-events/web.env
 Environment=PATH=/home/oskar-maria/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 75 %t/berlin-events-explorer-production-worker.lock /home/oskar-maria/.local/bin/uv run --no-sync --directory %h/.local/share/berlin-events-explorer/releases/current berlin-events worker --database /home/oskar-maria/projects/dev/berlin-events-explorer/events.sqlite
 SuccessExitStatus=75

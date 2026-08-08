@@ -75,6 +75,9 @@ from berlin_events_explorer.artist_enrichment import (
     open_musicbrainz_cache,
 )
 from berlin_events_explorer._version import version as PACKAGE_VERSION
+from berlin_events_explorer.ai_event_research import EventResearchObservation
+from berlin_events_explorer.event_details import EventDetails, effective_event_status
+from berlin_events_explorer.event_details_augmentation import augment_event_details
 from berlin_events_explorer.models import (
     ArtistCandidate,
     ArtistMetadata,
@@ -91,6 +94,9 @@ from berlin_events_explorer.models import (
     event_search_text,
 )
 from berlin_events_explorer import theme
+from berlin_events_explorer.performer_title_augmentation import (
+    performer_extractor_from_environment,
+)
 from berlin_events_explorer.sources.mytrueintent import MyTrueIntentSource
 from berlin_events_explorer.storage import AuthToken, EventStore, VenueSummary
 from berlin_events_explorer.sync import SyncError, open_sync_cache
@@ -819,6 +825,15 @@ def _approve_edited_venue(
             raise ValueError(
                 f"Unknown venue candidate: {venue_id}/{provider}/{osm_type}/{osm_id}"
             )
+        existing = store.find_venue_by_osm_identity(
+            candidate.osm_type, candidate.osm_id
+        )
+        if existing is not None and existing.id != venue_id:
+            raise ValueError(
+                "This location is already linked to another verified venue "
+                f"({existing.id!r}: {existing.name}). "
+                "Merge the duplicates or choose a different candidate."
+            )
         base = current.model_copy(
             update={
                 "address": candidate.address,
@@ -984,6 +999,42 @@ def create_app(
     """Create a Litestar app that renders stored events as HTML."""
 
     store = EventStore(database)
+    event_augmentation_lock = Lock()
+    event_augmentation_status: dict[str, str] = {}
+
+    def start_event_augmentation(event_id: str) -> None:
+        """Start one conservative JIT detail lookup per event in this app process."""
+
+        with event_augmentation_lock:
+            if event_augmentation_status.get(event_id) == "fetching":
+                return
+            event_augmentation_status[event_id] = "fetching"
+
+        def run() -> None:
+            try:
+                augment_event_details(store, limit=1, event_id=event_id)
+            except Exception:
+                logger.exception("Event detail augmentation failed for %s", event_id)
+                status = "failed"
+            else:
+                status = (
+                    "ready"
+                    if store.get_event_details(event_id) is not None
+                    else "failed"
+                )
+            with event_augmentation_lock:
+                event_augmentation_status[event_id] = status
+
+        Thread(target=run, name=f"event-details-{event_id[:12]}", daemon=True).start()
+
+    def current_event_augmentation_status(event_id: str) -> str:
+        """Return the current in-process status for one JIT augmentation request."""
+
+        if store.get_event_details(event_id) is not None:
+            return "ready"
+        with event_augmentation_lock:
+            return event_augmentation_status.get(event_id, "idle")
+
     if environment not in {"development", "production"}:
         raise ValueError("environment must be 'development' or 'production'")
     csrf_secret = _resolve_csrf_secret(environment)
@@ -1963,6 +2014,64 @@ def create_app(
             media_type="text/html",
         )
 
+    @get("/events/{event_id:str}/augmentation-status", sync_to_thread=True)
+    def event_augmentation_status_endpoint(event_id: str) -> Response:
+        """Return the JIT event-details job status for detail-page polling."""
+
+        if store.get_event(event_id) is None:
+            return Response(
+                content="not_found", media_type="text/plain", status_code=404
+            )
+        return Response(
+            content=current_event_augmentation_status(event_id), media_type="text/plain"
+        )
+
+    @get("/events/{event_id:str}", sync_to_thread=True)
+    def event_detail(request: Request, event_id: str) -> Response:
+        """Render one source event with its independently checked public links."""
+
+        event = store.get_event(event_id)
+        if event is None:
+            return Response(
+                content="<h1>Event not found</h1>",
+                media_type="text/html",
+                status_code=404,
+            )
+        details = store.get_event_details(event_id)
+        research = store.get_event_research(event_id)
+        augmentation_status = current_event_augmentation_status(event_id)
+        if details is None and augmentation_status == "idle":
+            start_event_augmentation(event_id)
+            augmentation_status = "fetching"
+        venue = store.get_venue_for_event(event_id)
+        artist_ids_by_event_performer = _verified_artist_ids_by_event_performer(
+            store, [event_id]
+        )
+        artist_records_by_id = {
+            artist_id: artist
+            for artist_id in set(artist_ids_by_event_performer.values())
+            if (artist := store.get_artist(artist_id)) is not None
+        }
+        artist_external_links_by_id = {
+            artist_id: store.get_artist_external_links(artist_id)
+            for artist_id in artist_records_by_id
+        }
+        return Response(
+            content=_render_event_detail_page(
+                event,
+                details,
+                research=research,
+                augmentation_status=augmentation_status,
+                venue_id=store.get_venue_ids_for_events([event_id]).get(event_id),
+                venue=venue,
+                artist_ids_by_event_performer=artist_ids_by_event_performer,
+                artist_records_by_id=artist_records_by_id,
+                artist_external_links_by_id=artist_external_links_by_id,
+                user=request.scope.get("user"),
+            ),
+            media_type="text/html",
+        )
+
     @get("/venues", sync_to_thread=True)
     def venues(page: int = 1, page_size: int = 0) -> Redirect:
         """Redirect the legacy catalog path to the canonical application URL."""
@@ -2521,6 +2630,8 @@ def create_app(
             index,
             search_events,
             date_events,
+            event_augmentation_status_endpoint,
+            event_detail,
             venues,
             venue_detail,
             artist_detail,
@@ -3123,6 +3234,240 @@ def _render_artist_detail_page(
         content=content,
         heading=artist.name,
         kicker="Berlin artist",
+        show_sync=False,
+        user=user,
+    )
+
+
+def _render_event_venue_map(venue: VenueRecord | None) -> str:
+    """Render a verified venue's OpenStreetMap location without geocoding on demand."""
+
+    if (
+        venue is None
+        or venue.status is not VenueStatus.VERIFIED
+        or venue.latitude is None
+        or venue.longitude is None
+    ):
+        return ""
+    latitude = f"{venue.latitude:.6f}"
+    longitude = f"{venue.longitude:.6f}"
+    west = f"{venue.longitude - 0.006:.6f}"
+    south = f"{venue.latitude - 0.004:.6f}"
+    east = f"{venue.longitude + 0.006:.6f}"
+    north = f"{venue.latitude + 0.004:.6f}"
+    map_embed_url = (
+        "https://www.openstreetmap.org/export/embed.html?"
+        f"bbox={west}%2C{south}%2C{east}%2C{north}"
+        f"&layer=mapnik&marker={latitude}%2C{longitude}"
+    )
+    map_url = (
+        "https://www.openstreetmap.org/?"
+        f"mlat={latitude}&mlon={longitude}#map=17/{latitude}/{longitude}"
+    )
+    return f"""<section class="venue-map" aria-labelledby="map-heading">
+      <h2 id="map-heading">Location</h2>
+      <iframe src="{escape(map_embed_url, quote=True)}"
+        title="Map showing {escape(venue.name, quote=True)}" loading="lazy"
+        referrerpolicy="no-referrer"></iframe>
+      <p><a href="{escape(map_url, quote=True)}" target="_blank"
+        rel="noopener noreferrer">View larger map</a></p>
+    </section>"""
+
+
+def _render_event_performer_details(
+    event: Event,
+    *,
+    artist_ids_by_event_performer: dict[tuple[str, int], str],
+    artist_records_by_id: dict[str, ArtistRecord],
+    artist_external_links_by_id: dict[str, dict[str, str]],
+) -> str:
+    """Render performer genres and only verified music-service destinations."""
+
+    cards: list[str] = []
+    for performer in event.performers:
+        artist_id = (
+            artist_ids_by_event_performer.get((event.id, performer.billing_order))
+            if performer.billing_order is not None
+            else None
+        )
+        artist = artist_records_by_id.get(artist_id) if artist_id else None
+        genres = artist.genres if artist is not None else performer.genres
+        genre_text = ", ".join(escape(genre) for genre in genres) or "Not listed"
+        external_links = (
+            artist_external_links_by_id.get(artist_id, {}) if artist_id else {}
+        )
+        homepage = external_links.get("official_homepage")
+        spotify = external_links.get("spotify")
+        youtube_music = external_links.get("youtube_music")
+        links = [
+            f'<a href="{escape(homepage, quote=True)}" target="_blank" rel="noopener noreferrer">Homepage</a>'
+            if homepage
+            else "",
+            f'<a href="{escape(spotify, quote=True)}" target="_blank" rel="noopener noreferrer">Spotify</a>'
+            if spotify
+            else "",
+            f'<a href="{escape(youtube_music, quote=True)}" target="_blank" rel="noopener noreferrer">YouTube Music</a>'
+            if youtube_music
+            else "",
+            f'<a href="https://www.youtube.com/results?search_query={escape(quote_plus(performer.name), quote=True)}" target="_blank" rel="noopener noreferrer">Search on YouTube</a>',
+        ]
+        artist_link = (
+            f'<a href="/artists/{escape(artist_id, quote=True)}">{escape(performer.name)}</a>'
+            if artist_id
+            else escape(performer.name)
+        )
+        cards.append(
+            f'<li><strong>{artist_link}</strong><br><span class="meta">'
+            f"Genres: {genre_text}</span><br>{' · '.join(link for link in links if link)}</li>"
+        )
+    if not cards:
+        return ""
+    return f'<section aria-labelledby="performers-heading"><h2 id="performers-heading">Performers</h2><ul>{"".join(cards)}</ul></section>'
+
+
+def _render_event_detail_page(
+    event: Event,
+    details: EventDetails | None,
+    *,
+    research: EventResearchObservation | None = None,
+    augmentation_status: str = "ready",
+    venue_id: str | None,
+    venue: VenueRecord | None,
+    artist_ids_by_event_performer: dict[tuple[str, int], str],
+    artist_records_by_id: dict[str, ArtistRecord],
+    artist_external_links_by_id: dict[str, dict[str, str]],
+    user: UserRecord | None = None,
+) -> str:
+    """Render a source event and only externally verified public actions."""
+
+    status = effective_event_status(event, details)
+    status_label = status.value.replace("_", " ").capitalize()
+    venue_name = escape(event.venue.name) if event.venue else "TBA"
+    venue_html = (
+        f'<a href="/venues/{escape(venue_id, quote=True)}">{venue_name}</a>'
+        if venue_id
+        else venue_name
+    )
+    performers = (
+        ", ".join(
+            f'<a href="/artists/{escape(artist_ids_by_event_performer[(event.id, performer.billing_order)], quote=True)}">{escape(performer.name)}</a>'
+            if performer.billing_order is not None
+            and (event.id, performer.billing_order) in artist_ids_by_event_performer
+            else escape(performer.name)
+            for performer in event.performers
+        )
+        or "TBA"
+    )
+    map_html = _render_event_venue_map(venue)
+    performer_details_html = _render_event_performer_details(
+        event,
+        artist_ids_by_event_performer=artist_ids_by_event_performer,
+        artist_records_by_id=artist_records_by_id,
+        artist_external_links_by_id=artist_external_links_by_id,
+    )
+
+    def external(url: str, label: str, class_name: str = "") -> str:
+        """Render one verified outbound action with tab-isolation safeguards."""
+
+        return (
+            f'<a class="{class_name}" href="{escape(url, quote=True)}" target="_blank" '
+            f'rel="noopener noreferrer">{label}</a>'
+        )
+
+    event_action = (
+        external(details.event_url, "View event")
+        if details and details.event_url
+        else ""
+    )
+    ticket_action = (
+        external(details.ticket_url, "Get tickets", "action-button")
+        if details and details.ticket_url
+        else ""
+    )
+    research_event_action = (
+        external(research.event_url, "View researched event") if research else ""
+    )
+    research_ticket_action = (
+        external(research.ticket_url, "Get tickets", "action-button")
+        if research and research.ticket_url
+        else ""
+    )
+    actions = " · ".join(
+        value
+        for value in (
+            ticket_action,
+            research_ticket_action,
+            event_action,
+            research_event_action,
+        )
+        if value
+    )
+    research_html = (
+        f"""<section class="event-research" aria-labelledby="event-research-heading">
+          <h2 id="event-research-heading">AI-assisted research</h2>
+          {f"<p>{escape(research.summary)}</p>" if research.summary else ""}
+          <p class="meta">Based on bounded SearXNG search results · {external(research.evidence_url, "View evidence")}</p>
+        </section>"""
+        if research
+        else ""
+    )
+    checked = (
+        f'<p class="meta">Links checked {_render_time(details.checked_at.date())}.</p>'
+        if details
+        else '<p class="meta">Links are being checked.</p>'
+    )
+    augmentation_notice = (
+        f"""<p class="augmentation-notice" role="status" aria-live="polite"
+          data-augmentation-status="fetching">
+          Fetching information… this page will update when it is ready.
+        </p><script>
+          (() => {{
+            const statusUrl = "/events/{escape(event.id, quote=True)}/augmentation-status";
+            const poll = async () => {{
+              try {{
+                const status = await (await fetch(statusUrl, {{cache: "no-store"}})).text();
+                if (status === "ready" || status === "failed") {{ window.location.reload(); return; }}
+              }} catch (_) {{ /* keep the current detail page usable while offline */ }}
+              window.setTimeout(poll, 900);
+            }};
+            window.setTimeout(poll, 900);
+          }})();
+        </script>"""
+        if details is None and augmentation_status == "fetching"
+        else (
+            '<p class="augmentation-notice" role="status">'
+            "Additional information could not be fetched right now."
+            "</p>"
+            if details is None and augmentation_status == "failed"
+            else ""
+        )
+    )
+    date_html = _render_time(event.start_date) if event.start_date else "TBA"
+    notes = "<br>".join(escape(note) for note in event.notes)
+    content = f"""<p><a href="/?tab=upcoming">← Back to events</a></p>
+      <section class="event-detail-grid" aria-label="Event details">
+        <div class="card detail-card event-facts">
+          <p><span class="status">{escape(status_label)}</span></p>
+          <dl>
+            <dt>Date</dt><dd>{date_html}</dd>
+            <dt>Venue</dt><dd>{venue_html}</dd>
+            <dt>Performers</dt><dd>{performers}</dd>
+            <dt>Status</dt><dd>{escape(status_label)}</dd>
+            <dt>Source</dt><dd>{escape(event.source.provider)}</dd>
+          </dl>
+          <p lang="de">{notes}</p>{checked}{augmentation_notice}
+          {research_html}
+          {performer_details_html}
+          <div class="detail-actions">{actions}</div>
+        </div>
+        {map_html}
+      </section>"""
+    return _render_app_page(
+        title=f"{event.title} · Berlin Events Explorer",
+        active_tab="event-detail",
+        content=content,
+        heading=event.title,
+        kicker="Berlin event",
         show_sync=False,
         user=user,
     )
@@ -3806,7 +4151,9 @@ def _render_event_row(
         if event.first_seen_at
         else "TBA"
     )
-    title = escape(event.title)
+    title = (
+        f'<a href="/events/{escape(event.id, quote=True)}">{escape(event.title)}</a>'
+    )
     venue_name = escape(event.venue.name) if event.venue else "TBA"
     venue = (
         f'<a href="/venues/{escape(venue_id)}">{venue_name}</a>'
@@ -4562,6 +4909,7 @@ def perform_sync(
                     http_cache=cache,
                     auto_approve_threshold=auto_approve_threshold,
                     progress=progress,
+                    performer_extractor=performer_extractor_from_environment(),
                 )
     finally:
         _SYNC_LOCK.release()
