@@ -1,0 +1,4 @@
+interface:
+  display_name: "Evts Domain Modeling"
+  short_description: "Model and evolve the evts catalog domain"
+  default_prompt: "Use $working-with-evts-domain to make this domain change consistent with the evts contexts, logical model, and ADRs."

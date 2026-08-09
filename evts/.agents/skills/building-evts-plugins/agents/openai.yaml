@@ -1,0 +1,4 @@
+interface:
+  display_name: "Building Evts Plugins"
+  short_description: "Design and implement evts plugin capabilities"
+  default_prompt: "Use $building-evts-plugins to design this connector, normalizer, resolver, or enricher against the evts contracts."

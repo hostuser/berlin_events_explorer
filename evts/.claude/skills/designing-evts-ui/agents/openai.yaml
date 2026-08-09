@@ -1,0 +1,4 @@
+interface:
+  display_name: "Designing the Evts UI"
+  short_description: "Build accessible Fahrplan evts interfaces"
+  default_prompt: "Use $designing-evts-ui to design this evts screen with the Fahrplan language and public/editorial UX contracts."

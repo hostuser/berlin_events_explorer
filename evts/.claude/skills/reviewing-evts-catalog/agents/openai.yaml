@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reviewing the Evts Catalog"
+  short_description: "Implement and assess catalog review workflows"
+  default_prompt: "Use $reviewing-evts-catalog to implement or assess this editorial resolution workflow against evts policy."
