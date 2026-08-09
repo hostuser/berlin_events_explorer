@@ -221,6 +221,7 @@ def test_event_detail_page_renders_venue_map_and_verified_artist_music_data(
     assert "Map showing Example venue" in response.text
     assert "openstreetmap.org/export/embed.html" in response.text
     assert "Ambient, Electronic" in response.text
+    assert "<dt>Genres</dt><dd>Ambient, Electronic</dd>" in response.text
     assert 'href="https://open.spotify.com/artist/example"' in response.text
     assert 'href="https://music.youtube.com/channel/example"' in response.text
     assert "Search on YouTube" in response.text

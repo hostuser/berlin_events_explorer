@@ -3365,6 +3365,24 @@ def _render_event_detail_page(
         artist_records_by_id=artist_records_by_id,
         artist_external_links_by_id=artist_external_links_by_id,
     )
+    genres: list[str] = []
+    seen_genres: set[str] = set()
+    for performer in event.performers:
+        artist_id = (
+            artist_ids_by_event_performer.get((event.id, performer.billing_order))
+            if performer.billing_order is not None
+            else None
+        )
+        artist = artist_records_by_id.get(artist_id) if artist_id else None
+        if artist is None:
+            continue
+        for genre in artist.genres:
+            normalized_genre = genre.casefold()
+            if normalized_genre not in seen_genres:
+                genres.append(genre)
+                seen_genres.add(normalized_genre)
+    genres_html = ", ".join(escape(genre) for genre in genres)
+    genre_fact = f"<dt>Genres</dt><dd>{genres_html}</dd>" if genres_html else ""
 
     def external(url: str, label: str, class_name: str = "") -> str:
         """Render one verified outbound action with tab-isolation safeguards."""
@@ -3452,6 +3470,7 @@ def _render_event_detail_page(
             <dt>Date</dt><dd>{date_html}</dd>
             <dt>Venue</dt><dd>{venue_html}</dd>
             <dt>Performers</dt><dd>{performers}</dd>
+            {genre_fact}
             <dt>Status</dt><dd>{escape(status_label)}</dd>
             <dt>Source</dt><dd>{escape(event.source.provider)}</dd>
           </dl>
